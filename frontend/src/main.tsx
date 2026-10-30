@@ -1,0 +1,13 @@
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import {BrowserRouter} from 'react-router-dom';
+import {QueryClient,QueryClientProvider} from '@tanstack/react-query';
+import {CssBaseline,ThemeProvider,createTheme} from '@mui/material';
+import App from './App';
+import './style.css';
+import './branding.css';
+import './order-status.css';
+import {ConfirmationProvider} from './ConfirmDialog';
+const theme=createTheme({palette:{primary:{main:'#214f3b'},secondary:{main:'#b3783e'},background:{default:'#f7f8f5'},text:{primary:'#172e23',secondary:'#6d7b71'}},typography:{fontFamily:'Inter, "Segoe UI", Arial, sans-serif',button:{textTransform:'none',fontWeight:700}},shape:{borderRadius:10}});
+const queryClient=new QueryClient({defaultOptions:{queries:{retry:1,staleTime:15000,refetchOnWindowFocus:true}}});
+ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={queryClient}><ThemeProvider theme={theme}><CssBaseline/><BrowserRouter><ConfirmationProvider><App/></ConfirmationProvider></BrowserRouter></ThemeProvider></QueryClientProvider></React.StrictMode>);

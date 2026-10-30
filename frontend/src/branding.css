@@ -1,0 +1,122 @@
+.brand {
+  display: inline-flex;
+  align-items: center;
+}
+
+.brand-logo {
+  display: block;
+  width: 132px;
+  height: 62px;
+  object-fit: contain;
+  background: #000;
+  border-radius: 7px;
+}
+
+.hero-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  padding: 12px;
+}
+
+.locations-section {
+  padding-top: 72px;
+  scroll-margin-top: 80px;
+}
+
+.locations-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.location-card {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border-radius: 15px !important;
+}
+
+.location-card .location-icon {
+  font-size: 34px;
+  color: #1f5a36;
+}
+
+.location-card > .MuiButton-root {
+  margin-top: auto;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Tablet and smaller laptop layouts */
+@media (max-width: 1100px) {
+  .locations-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .header-actions { gap: 3px; }
+  .header-actions .MuiButton-root { padding-inline: 9px; }
+}
+
+@media (max-width: 900px) {
+  .topbar .MuiContainer-root { padding-inline: 14px; }
+  .brand-logo { width: 108px; height: 56px; }
+  .header-actions .MuiButton-root { font-size: 11px; min-width: auto; }
+  .locations-section { padding-top: 52px; }
+  .location-card { padding: 20px; }
+  .MuiDialog-paper { max-width: calc(100vw - 24px) !important; margin: 12px !important; }
+  .MuiTableContainer-root { max-width: calc(100vw - 36px); overflow-x: auto; }
+  .MuiTable-root { min-width: 680px; }
+}
+
+@media (max-width: 600px) {
+  .topbar .MuiToolbar-root { min-height: 64px; gap: 6px; }
+  .brand-logo {
+    width: 82px;
+    height: 50px;
+  }
+  .header-actions { gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .header-actions::-webkit-scrollbar { display: none; }
+  .header-actions .MuiButton-root { white-space: nowrap; padding: 6px; font-size: 10px; }
+  .locations-grid { grid-template-columns: 1fr; }
+  .locations-section { padding-top: 38px; }
+  .location-card { padding: 18px; gap: 14px; }
+  .hero-logo { padding: 6px; }
+  .MuiDialogContent-root { padding-inline: 16px !important; }
+  .MuiDialogActions-root { padding-inline: 16px !important; flex-wrap: wrap; }
+  .MuiDialogContent-root .MuiStack-root { max-width: 100%; }
+  .MuiDialogContent-root .MuiTextField-root { min-width: 0; }
+  .MuiTableContainer-root { max-width: calc(100vw - 24px); }
+}
+
+/* Narrow phones */
+@media (max-width: 480px) {
+  .topbar .MuiContainer-root { padding-inline: 8px; }
+  .brand-logo { width: 68px; height: 46px; }
+  .header-actions .MuiButton-root { font-size: 9px; padding-inline: 5px; }
+  .header-actions .MuiButton-startIcon { display: none; }
+  .product-grid { grid-template-columns: 1fr !important; }
+  .product-art { height: 190px; }
+  .product-info { padding: 18px; }
+  .benefit-strip { flex-wrap: wrap; justify-content: center; }
+  .hero-copy { padding-inline: 20px !important; }
+  .hero h1 { font-size: 36px !important; }
+  .workspace-main { padding-inline: 12px !important; }
+  .workspace-top { flex-wrap: wrap; }
+  .workspace-heading { gap: 12px; }
+  .metric-grid { grid-template-columns: 1fr !important; }
+  .pos-products { grid-template-columns: 1fr !important; }
+  .branch-grid { grid-template-columns: 1fr !important; }
+  .MuiTableContainer-root { max-width: calc(100vw - 24px); }
+  .MuiDialog-paper { width: calc(100vw - 16px) !important; max-width: none !important; margin: 8px !important; }
+}
+
+@media (max-width: 360px) {
+  .brand-logo { width: 58px; height: 42px; }
+  .header-actions .MuiButton-root { font-size: 8px; padding-inline: 3px; }
+  .hero h1 { font-size: 32px !important; }
+  .location-card { padding: 15px; }
+}

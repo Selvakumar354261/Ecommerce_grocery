@@ -1,0 +1,22 @@
+.order-timeline > div:has(strong:first-of-type) small {
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.order-timeline > div:has(strong:first-of-type) strong:first-of-type {
+  text-transform: capitalize;
+}
+
+.order-timeline > div:has(strong:first-of-type:nth-last-child(n)) small {
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.5rem;
+  background: #f5f6f3;
+}
+
+.order-timeline > div:last-child small {
+  width: 100%;
+  color: #8b1e1e;
+  background: #fff1f0;
+  border: 1px solid #f0b8b3;
+  font-weight: 600;
+}

@@ -1,0 +1,27 @@
+# Template only: provide real certificates and mount this into the proxy container.
+# Adjust your production Compose ports and volumes explicitly.
+server {
+  listen 80;
+  server_name shop.example.com;
+  return 301 https://$host$request_uri;
+}
+server {
+  listen 443 ssl;
+  server_name shop.example.com;
+  ssl_certificate /etc/nginx/certs/fullchain.pem;
+  ssl_certificate_key /etc/nginx/certs/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  server_tokens off;
+  client_max_body_size 2m;
+  add_header Strict-Transport-Security "max-age=31536000" always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header X-Frame-Options SAMEORIGIN always;
+  location /api/ {
+    proxy_pass http://backend:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+  location / { proxy_pass http://frontend:80; }
+}
+
