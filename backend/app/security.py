@@ -18,6 +18,14 @@ ROLE_ACCESS = {
     'delivery': {'permissions':['delivery.mobile'],'workspace_pages':[]},
 }
 
+def admin_login_only():
+    return os.getenv('ADMIN_LOGIN_ONLY','true').lower()!='false'
+
+def ensure_login_allowed(user=None):
+    """Block every non-admin sign-in (customer OTP, registration, delivery, staff) while ADMIN_LOGIN_ONLY is on."""
+    if admin_login_only() and (user is None or user.role!='admin'):
+        raise HTTPException(403,'Only administrator login is enabled.')
+
 def access_for(user):
     access=ROLE_ACCESS.get(user.role,{'permissions':[],'workspace_pages':[]})
     return {'permissions':list(access['permissions']),'workspace_pages':list(access['workspace_pages'])}
@@ -39,6 +47,7 @@ def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 def create_session(db, user):
+    ensure_login_allowed(user)
     token, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
     db.add(Session(token_hash=token_hash(token), user_id=user.id, csrf=csrf, expires_at=now()+timedelta(hours=12)))
     return token, csrf
@@ -53,6 +62,8 @@ def current_user(request: Request, db: DBSession = Depends(database)):
     user = db.get(User, session.user_id)
     if not user or not user.active:
         raise HTTPException(401, 'This account is inactive.')
+    if admin_login_only() and user.role != 'admin':
+        raise HTTPException(401, 'Only administrator login is enabled.')
     if not bearer and request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.csrf):
             raise HTTPException(403, 'Session validation failed. Refresh and retry.')

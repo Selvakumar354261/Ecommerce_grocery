@@ -9,6 +9,8 @@ from sample_data import main as seed
 @pytest.fixture(autouse=True)
 def reset(monkeypatch):
     monkeypatch.setenv('SEED_ADMIN_ONLY','false')
+    # Existing workflow tests exercise every role; admin-only mode is covered in test_admin_login_only.py.
+    monkeypatch.setenv('ADMIN_LOGIN_ONLY','false')
     assert engine.url.database=='grocery_test','Tests require the isolated grocery_test database.'
     with engine.begin() as connection:
         connection.execute(text('TRUNCATE '+','.join('"'+t+'"' for t in __import__('app.models',fromlist=['Base']).Base.metadata.tables)+' RESTART IDENTITY CASCADE'))

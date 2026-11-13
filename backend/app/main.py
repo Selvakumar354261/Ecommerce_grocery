@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as DBSession
 from .db import database
 from .models import *
 from .schemas import *
-from .security import access_for, create_session, current_user, hash_password, require, scope, token_hash, verify_password
+from .security import access_for, admin_login_only, create_session, current_user, ensure_login_allowed, hash_password, require, scope, token_hash, verify_password
 from .services import audit, available, create_order, create_sale, eligibility, get_or_404, idempotent, lines, lock_stock, money, reservation_hours, transition, stock_quantity
 from .xlsx_import import product_rows
 from .barcodes import code128_svg
@@ -106,6 +106,7 @@ def deliver_otp(phone,code):
 
 @app.post(prefix+'/auth/otp/request')
 def request_otp(data:OTPRequestIn,db:DBSession=DB):
+    ensure_login_allowed()
     phone=data.phone
     lock=int.from_bytes(hashlib.sha256(('otp:'+phone).encode()).digest()[:8],'big',signed=True)
     db.execute(text('SELECT pg_advisory_xact_lock(:k)'),{'k':lock})
@@ -119,6 +120,7 @@ def request_otp(data:OTPRequestIn,db:DBSession=DB):
 
 @app.post(prefix+'/auth/otp/verify')
 def verify_otp(data:OTPVerifyIn,response:Response,db:DBSession=DB):
+    ensure_login_allowed()
     record=db.get(MobileOTP,data.phone)
     if not record or record.expires_at<=now(): raise HTTPException(401,'The OTP has expired. Request a new one.')
     if record.attempts>=5: raise HTTPException(429,'Too many incorrect attempts. Request a new OTP.')
@@ -156,6 +158,7 @@ def verify_otp(data:OTPVerifyIn,response:Response,db:DBSession=DB):
 
 @app.post(prefix+'/auth/register',status_code=201)
 def register(data:RegisterIn,response:Response,db:DBSession=DB):
+    ensure_login_allowed()
     email=data.email.strip().lower()
     if '@' not in email or '.' not in email.split('@')[-1]: raise HTTPException(422,'Enter a valid email address.')
     if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,'An account with this email already exists.')
@@ -178,11 +181,13 @@ def login(data:LoginIn,request:Request,response:Response,db:DBSession=DB):
         attempt.count+=1;db.commit()
         raise HTTPException(401,'Email or password is incorrect.')
     if user.role=='customer': raise HTTPException(403,'Customers must sign in with mobile OTP.')
+    ensure_login_allowed(user)
     attempt.count=0
     return set_session(db,user,response)
 
 @app.post(prefix+'/delivery/auth/login')
 def delivery_login(data:LoginIn,request:Request,db:DBSession=DB):
+    ensure_login_allowed()
     email=data.email.strip().lower()
     key=hashlib.sha256(f'delivery:{email}:{request.client.host if request.client else "unknown"}'.encode()).hexdigest()
     lock=int.from_bytes(bytes.fromhex(key)[:8],'big',signed=True)
@@ -208,6 +213,7 @@ def session_status(request:Request,db:DBSession=DB):
     if not session or session.expires_at<=now(): return {'user':None,'csrf':''}
     user=db.get(User,session.user_id)
     if not user or not user.active:return {'user':None,'csrf':''}
+    if admin_login_only() and user.role!='admin':return {'user':None,'csrf':''}
     return {'user':user_view(user),'csrf':session.csrf}
 
 @app.post(prefix+'/auth/logout')
