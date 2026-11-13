@@ -4,6 +4,7 @@ import {Alert,AppBar,Box,Button,CircularProgress,Container,MenuItem,Paper,Snackb
 import {useQuery,useQueryClient} from '@tanstack/react-query';
 import ShoppingBagOutlined from '@mui/icons-material/ShoppingBagOutlined';
 import SpaOutlined from '@mui/icons-material/SpaOutlined';
+import {useRef} from 'react';
 import {api,post,setCsrf} from './api';
 import {AppContext,useApp} from './context';
 import type {CartLine,Product,User} from './types';
@@ -11,12 +12,21 @@ import {Shop,Checkout,CustomerOrders} from './Shop';
 import {Operations} from './Operations';
 
 function Header(){
+ const headerRef=useRef<HTMLElement>(null);
+ useEffect(()=>{
+  const element=headerRef.current;
+  if(!element)return;
+  const update=()=>document.documentElement.style.setProperty('--app-header-height',`${element.getBoundingClientRect().height}px`);
+  update();
+  const observer=new ResizeObserver(update);observer.observe(element);
+  return ()=>observer.disconnect();
+ },[]);
  const {user,signOut,cart}=useApp();
  const location=useLocation();
  const portalLogin=location.pathname==='/portal/login';
  const staff=!!user?.permissions.includes('workspace');
- return <AppBar position="sticky" color="inherit" elevation={0} className="topbar"><Container maxWidth="xl"><Toolbar disableGutters sx={{gap:2,minHeight:76}}>
-  <Link to={staff?'/workspace':portalLogin?'/portal/login':'/'} className="brand" aria-label="CHINNU home"><img src="/chinnu-logo.jpeg" alt="CHINNU" className="brand-logo"/></Link>
+ return <AppBar ref={headerRef} position="sticky" color="inherit" elevation={0} className="topbar"><Container maxWidth="xl"><Toolbar disableGutters sx={{gap:2,minHeight:76}}>
+  <Link to={staff?'/workspace':portalLogin?'/portal/login':'/'} className="brand" aria-label="CHINNU home"><img src="/chinnu-logo-transparent.png" alt="CHINNU" className="brand-logo"/></Link>
   <Box sx={{flex:1}}/>
   {!portalLogin&&<Box className="header-actions">
   {!staff&&<Button component={Link} to="/" color="inherit">Shop</Button>}
@@ -30,13 +40,14 @@ function Header(){
 }
 
 function Login(){
+ const location=useLocation();
  const [email,setEmail]=useState(''),[name,setName]=useState(''),[phone,setPhone]=useState(''),[otp,setOtp]=useState(''),[otpSent,setOtpSent]=useState(false),[needsProfile,setNeedsProfile]=useState(false),[developmentOtp,setDevelopmentOtp]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  const {refreshAuth}=useApp();const navigate=useNavigate();
  async function submit(e:React.FormEvent){e.preventDefault();setError('');setBusy(true);try{
   if(!otpSent){const result=await post<{sent:boolean;development_otp?:string}>('/auth/otp/request',{phone});setOtpSent(true);setDevelopmentOtp(result.development_otp||'');return}
   const result=await post<{user?:User;csrf?:string;profile_required?:boolean}>('/auth/otp/verify',{phone,otp,name:needsProfile?name.trim()||null:null,email:needsProfile?email.trim()||null:null});
   if(result.profile_required){setNeedsProfile(true);setError('');return}
-  setCsrf(result.csrf!);await refreshAuth();navigate('/');
+  setCsrf(result.csrf!);await refreshAuth();navigate(location.state?.returnTo === '/checkout' ? '/checkout' : '/', {replace:true});
  }catch(err){setError((err as Error).message)}finally{setBusy(false)}}
  return <Container maxWidth="lg" sx={{py:7}}><div className="auth-grid"><div className="auth-story"><span className="eyebrow">CHINNU</span><h1>Pure grains.<br/>Better tomorrow.</h1><p>Modern rice mill, cattle feed, and everyday essentials from CHINNU.</p><div className="auth-leaf"><SpaOutlined sx={{fontSize:130}}/></div></div><Paper variant="outlined" sx={{p:{xs:3,md:5},borderRadius:4}}><Typography variant="h4" gutterBottom>{needsProfile?'Create your account':otpSent?'Enter your OTP':'Continue with mobile'}</Typography><Typography color="text.secondary" sx={{mb:3}}>{needsProfile?'We verified your number. Tell us your name once to finish.':otpSent?`We sent a six-digit code to ${phone}.`:'No password needed.'}</Typography><Box component="form" onSubmit={submit}><Stack spacing={2.5}>
  {error&&<Alert severity="error">{error}</Alert>}
@@ -50,7 +61,7 @@ function StaffLogin(){
  const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  const {refreshAuth}=useApp();const navigate=useNavigate();
  async function submit(e:React.FormEvent){e.preventDefault();setError('');setBusy(true);try{const result=await post<{user:User;csrf:string}>('/auth/login',{email,password});setCsrf(result.csrf);await refreshAuth();navigate('/workspace')}catch(err){setError((err as Error).message)}finally{setBusy(false)}}
- return <Container maxWidth="sm" sx={{py:{xs:5,md:9}}}><Paper variant="outlined" sx={{p:{xs:3,md:5},borderRadius:4}}><span className="eyebrow">CHINNU OPERATIONS</span><Typography variant="h4" sx={{mt:2}}>Admin &amp; staff portal</Typography><Typography color="text.secondary" sx={{mt:1,mb:3}}>Authorised team members only.</Typography><Box component="form" onSubmit={submit}><Stack spacing={2.5}>{error&&<Alert severity="error">{error}</Alert>}<TextField label="Staff email address" type="email" required value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email"/><TextField label="Password" type="password" required value={password} onChange={e=>setPassword(e.target.value)} inputProps={{maxLength:128}} autoComplete="current-password"/><Button type="submit" variant="contained" size="large" disabled={busy}>{busy?'Please wait…':'Open staff portal'}</Button></Stack></Box></Paper></Container>
+ return <Container maxWidth="sm" sx={{py:{xs:5,md:9}}}><Paper variant="outlined" sx={{p:{xs:3,md:5},borderRadius:4}}><span className="eyebrow">CHINNU OPERATIONS</span><Typography variant="h4" sx={{mt:2}}>Admin &amp; staff portal</Typography><Typography color="text.secondary" sx={{mt:1,mb:3}}>Authorised team members only.</Typography><Box component="form" onSubmit={submit}><Stack spacing={2.5}>{error&&<Alert severity="error">{error}</Alert>}<TextField label="Staff email address" type="email" required value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email"/><TextField label="Password" type="password" required value={password} onChange={e=>setPassword(e.target.value)} inputProps={{maxLength:128}} autoComplete="current-password"/><Button type="submit" variant="contained" size="large" fullWidth sx={{height:56}} disabled={busy}>{busy?'Please wait…':'Open staff portal'}</Button></Stack></Box></Paper></Container>
 }
 
 export default function App(){

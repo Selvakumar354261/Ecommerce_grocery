@@ -63,6 +63,12 @@ class SalePaymentIn(BaseModel):
     method: Literal['cash','card','upi']
     amount: Decimal = Field(gt=0,le=10000000,max_digits=12,decimal_places=2)
 
+class OrderPaymentIn(BaseModel):
+    payment_method: Literal['cash','card','upi','split']
+    payments: list[SalePaymentIn] = Field(default_factory=list,max_length=3)
+    amount_tendered: Decimal | None = Field(default=None,ge=0,le=10000000,max_digits=12,decimal_places=2)
+    expected_total: Decimal | None = Field(default=None,ge=0,max_digits=12,decimal_places=2)
+
 class SaleIn(CartIn):
     branch_id: int = Field(gt=0)
     customer_mobile: str = Field(pattern=r'^[6-9][0-9]{9}$')
@@ -79,6 +85,18 @@ class StockIn(BaseModel):
     reason: str = Field(min_length=3,max_length=500)
     kind: Literal['receive','damage','adjust_up','adjust_down'] = 'receive'
 
+class CustomerAddressIn(BaseModel):
+    label: str = Field(min_length=1,max_length=80)
+    address: str = Field(min_length=8,max_length=500)
+    phone: str = Field(pattern=r'^[6-9][0-9]{9}$')
+    latitude: Decimal = Field(ge=-90,le=90,max_digits=10,decimal_places=7)
+    longitude: Decimal = Field(ge=-180,le=180,max_digits=10,decimal_places=7)
+    @model_validator(mode='after')
+    def clean(self):
+        self.label=self.label.strip();self.address=self.address.strip()
+        if not self.label or len(self.address)<8:raise ValueError('Enter a label and complete address.')
+        return self
+
 class VariantIn(BaseModel):
     sku: str = Field(min_length=2,max_length=60)
     label: str = Field(min_length=1,max_length=80)
@@ -94,15 +112,27 @@ class VariantIn(BaseModel):
             raise ValueError('Pack and piece quantities must be whole numbers.')
         return self
 
-class ProductIn(BaseModel):
+class ProductDetailsIn(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     category: str = Field(min_length=2,max_length=80)
     description: str = Field(default='',max_length=1000)
     tone: Literal['sage','gold','rose','clay'] = 'sage'
+
+class ProductIn(ProductDetailsIn):
     variants: list[VariantIn] = Field(min_length=1,max_length=20)
+
+class VariantUpdateIn(VariantIn):
+    id: int | None = Field(default=None,gt=0)
+
+class ProductUpdateIn(ProductDetailsIn):
+    variants: list[VariantUpdateIn] = Field(min_length=1,max_length=20)
 
 class PriceIn(BaseModel):
     price: Decimal = Field(gt=0,le=1000000,max_digits=12,decimal_places=2)
+
+class DeliverySlabIn(BaseModel):
+    up_to_km: Decimal = Field(gt=0,le=500,max_digits=5,decimal_places=2)
+    fee: Decimal = Field(ge=0,le=10000,max_digits=7,decimal_places=2)
 
 class BranchIn(BaseModel):
     name: str = Field(min_length=2,max_length=120)
@@ -111,24 +141,47 @@ class BranchIn(BaseModel):
     longitude: float = Field(ge=-180,le=180)
     radius_km: Decimal = Field(gt=0,le=500)
     delivery_fee: Decimal = Field(ge=0,le=10000)
+    delivery_slabs: list[DeliverySlabIn] = Field(default_factory=list,max_length=30)
     hours: str = Field(default='09:00–21:00',max_length=120)
     accepting_orders: bool = True
     active: bool = True
+    @model_validator(mode='after')
+    def delivery_ranges(self):
+        previous=Decimal(0)
+        for slab in self.delivery_slabs:
+            if slab.up_to_km<=previous:raise ValueError('Distance limits must be unique and entered in increasing order.')
+            previous=slab.up_to_km
+        if self.delivery_slabs and previous!=self.radius_km:
+            raise ValueError('The last distance limit must equal the branch delivery radius to cover every distance.')
+        return self
 
 class StaffIn(RegisterIn):
-    role: Literal['manager','cashier','inventory']
+    role: Literal['manager','cashier','inventory','delivery']
     branch_id: int = Field(gt=0)
 
 class StaffUpdateIn(BaseModel):
     name: str = Field(min_length=2,max_length=100)
     email: str = Field(min_length=3,max_length=180)
-    role: Literal['manager','cashier','inventory']
+    role: Literal['manager','cashier','inventory','delivery']
     branch_id: int = Field(gt=0)
     password: str | None = Field(default=None,min_length=10,max_length=128)
 
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(min_length=1,max_length=128)
     new_password: str = Field(min_length=10,max_length=128)
+
+class DeliveryAssignmentIn(BaseModel):
+    delivery_user_id: int = Field(gt=0)
+
+class DeliveryCompleteIn(BaseModel):
+    otp: str = Field(pattern=r'^[0-9]{6}$')
+
+class DeliveryFailureIn(BaseModel):
+    reason: str = Field(min_length=3,max_length=500)
+
+class DeliveryLocationIn(BaseModel):
+    latitude: float = Field(ge=-90,le=90)
+    longitude: float = Field(ge=-180,le=180)
 
 class TransferIn(BaseModel):
     source_id: int = Field(gt=0)

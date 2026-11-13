@@ -8,7 +8,7 @@ import os
 import secrets
 import urllib.request
 import uuid
-from datetime import timedelta
+from datetime import date as Date, timedelta
 from decimal import Decimal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -25,6 +25,8 @@ from .security import access_for, create_session, current_user, hash_password, r
 from .services import audit, available, create_order, create_sale, eligibility, get_or_404, idempotent, lines, lock_stock, money, reservation_hours, transition, stock_quantity
 from .xlsx_import import product_rows
 from .barcodes import code128_svg
+from .delivery_reporting import operations_detail, operations_report
+from .order_payments import collection_order, collection_view, record_collection, settlement_quote
 
 app=FastAPI(title='CHINNU Commerce API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',redoc_url=None)
 prefix='/api/v1'
@@ -179,6 +181,23 @@ def login(data:LoginIn,request:Request,response:Response,db:DBSession=DB):
     attempt.count=0
     return set_session(db,user,response)
 
+@app.post(prefix+'/delivery/auth/login')
+def delivery_login(data:LoginIn,request:Request,db:DBSession=DB):
+    email=data.email.strip().lower()
+    key=hashlib.sha256(f'delivery:{email}:{request.client.host if request.client else "unknown"}'.encode()).hexdigest()
+    lock=int.from_bytes(bytes.fromhex(key)[:8],'big',signed=True)
+    db.execute(text('SELECT pg_advisory_xact_lock(:k)'),{'k':lock})
+    attempt=db.get(LoginAttempt,key)
+    if not attempt:attempt=LoginAttempt(key=key,count=0,window=now());db.add(attempt)
+    if attempt.window<now()-timedelta(minutes=15):attempt.count=0;attempt.window=now()
+    if attempt.count>=10:raise HTTPException(429,'Too many login attempts. Try again in 15 minutes.')
+    user=db.scalar(select(User).where(User.email==email))
+    if not user or not user.active or user.role!='delivery' or not verify_password(data.password,user.password_hash):
+        attempt.count+=1;db.commit();raise HTTPException(401,'Email or password is incorrect.')
+    attempt.count=0
+    token,csrf=create_session(db,user);audit(db,user,'delivery.login',user.id)
+    return {'token':token,'user':user_view(user),'expires_in':43200}
+
 @app.get(prefix+'/auth/me')
 def me(request:Request,user:User=UserDep): return {'user':user_view(user),'csrf':request.state.csrf}
 
@@ -218,6 +237,36 @@ def branches(db:DBSession=DB):
 @app.post(prefix+'/checkout/branches')
 def checkout_branches(data:EligibilityIn,db:DBSession=DB): return eligibility(db,data)
 
+@app.get(prefix+'/customer/addresses')
+def saved_addresses(user:User=UserDep,db:DBSession=DB):
+    require(user,('customer',))
+    return [row(a) for a in db.scalars(select(CustomerAddress).where(CustomerAddress.user_id==user.id).order_by(CustomerAddress.id)).all()]
+
+@app.post(prefix+'/customer/addresses',status_code=201)
+def save_address(data:CustomerAddressIn,user:User=UserDep,db:DBSession=DB):
+    require(user,('customer',))
+    db.scalar(select(User).where(User.id==user.id).with_for_update())
+    if db.scalar(select(func.count()).select_from(CustomerAddress).where(CustomerAddress.user_id==user.id))>=20:
+        raise HTTPException(422,'You can save up to 20 addresses. Remove an unused address first.')
+    address=CustomerAddress(user_id=user.id,**data.model_dump());db.add(address);db.flush()
+    return row(address)
+
+@app.put(prefix+'/customer/addresses/{ident}')
+def update_address(ident:int,data:CustomerAddressIn,user:User=UserDep,db:DBSession=DB):
+    require(user,('customer',))
+    address=db.scalar(select(CustomerAddress).where(CustomerAddress.id==ident,CustomerAddress.user_id==user.id).with_for_update())
+    if not address:raise HTTPException(404,'Saved address not found.')
+    for key,value in data.model_dump().items():setattr(address,key,value)
+    return row(address)
+
+@app.delete(prefix+'/customer/addresses/{ident}')
+def delete_address(ident:int,user:User=UserDep,db:DBSession=DB):
+    require(user,('customer',))
+    address=db.scalar(select(CustomerAddress).where(CustomerAddress.id==ident,CustomerAddress.user_id==user.id).with_for_update())
+    if not address:raise HTTPException(404,'Saved address not found.')
+    db.delete(address)
+    return {'ok':True}
+
 @app.get(prefix+'/checkout/defaults')
 def checkout_defaults(user:User=UserDep,db:DBSession=DB):
     require(user,('customer',))
@@ -231,11 +280,25 @@ def place_order(data:OrderIn,user:User=UserDep,db:DBSession=DB,idempotency_key:s
 
 def order_view(db,o,user):
     b=db.get(Branch,o.branch_id)
-    result={**row(o),'number':f'ORD-{o.id:06d}','branch_name':b.name,'branch_address':b.address,'customer_name':db.get(User,o.user_id).name}
+    delivery_user=db.get(User,o.assigned_delivery_user_id) if o.assigned_delivery_user_id else None
+    result={**row(o),'number':f'ORD-{o.id:06d}','branch_name':b.name,'branch_address':b.address,'customer_name':db.get(User,o.user_id).name,'assigned_delivery_name':delivery_user.name if delivery_user else None}
     if user.role!='customer': result.pop('pickup_code',None)
     result['items']=[row(x) for x in db.scalars(select(OrderItem).where(OrderItem.order_id==o.id)).all()]
     events=db.scalars(select(OrderEvent).where(OrderEvent.order_id==o.id).order_by(OrderEvent.id)).all()
     result['events']=[row(x) for x in events]
+    result['payment_collection']=collection_view(db,o)
+    if user.role=='customer':
+        result['assigned_delivery_name']=None
+        for event in result['events']:
+            event['tone']='success' if event['status'] in ('completed','payment_received') else 'error' if event['status'] in ('cancelled','rejected','delivery_failed') else 'neutral'
+            if event['status']=='delivery_assigned':
+                event['display_status']='dispatched'
+                event['note']=''
+            elif event['status']=='dispatched':
+                event['display_status']='delivery_started'
+                event['note']='Delivery person started the trip.'
+        if result['payment_collection']:
+            result['payment_collection']['collected_by']='Store / delivery team'
     last_actor=db.get(User,events[-1].actor_id) if events and events[-1].actor_id else None
     store_rejected=(o.status=='cancelled' and events and (events[-1].status=='rejected' or (last_actor and last_actor.role in ('admin','manager'))))
     result['display_status']='rejected' if store_rejected else o.status
@@ -258,6 +321,8 @@ def order_detail(ident:int,user:User=UserDep,db:DBSession=DB):
     o=get_or_404(db,Order,ident)
     if user.role=='customer':
         if o.user_id!=user.id: raise HTTPException(404,'Order not found.')
+    elif user.role=='delivery':
+        if o.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
     else: scope(user,o.branch_id,('admin','manager'))
     return order_view(db,o,user)
 
@@ -266,12 +331,136 @@ def order_transition(ident:int,data:TransitionIn,user:User=UserDep,db:DBSession=
     return idempotent(db,user,f'order.transition.{ident}',idempotency_key,data.model_dump(),lambda:transition(db,user,ident,data))
 
 @app.post(prefix+'/orders/{ident}/payment')
-def record_payment(ident:int,user:User=UserDep,db:DBSession=DB):
-    o=get_or_404(db,Order,ident,True);scope(user,o.branch_id,('admin','manager'))
-    if o.status not in ('ready','dispatched'): raise HTTPException(409,'Record collection at handover or delivery.')
-    if o.payment_status=='paid':return {'ok':True}
-    o.payment_status='paid';audit(db,user,'order.cash_collected',ident,amount=str(o.total))
+def record_payment(ident:int,data:OrderPaymentIn,user:User=UserDep,db:DBSession=DB):
+    order=collection_order(db,user,ident,True)
+    return record_collection(db,user,order,data)
+
+@app.post(prefix+'/orders/{ident}/payment/preview')
+def preview_order_payment(ident:int,data:OrderPaymentIn,user:User=UserDep,db:DBSession=DB):
+    order=collection_order(db,user,ident)
+    if order.payment_status=='paid':raise HTTPException(409,'Payment is already recorded. Refresh this order.')
+    return settlement_quote(order,data)
+
+@app.get(prefix+'/delivery/staff')
+def delivery_staff(branch_id:int,user:User=UserDep,db:DBSession=DB):
+    scope(user,branch_id,('admin','manager'))
+    return [user_view(x) for x in db.scalars(select(User).where(User.role=='delivery',User.branch_id==branch_id,User.active==True).order_by(User.name)).all()]
+
+@app.post(prefix+'/orders/{ident}/assign-delivery')
+def assign_delivery(ident:int,data:DeliveryAssignmentIn,user:User=UserDep,db:DBSession=DB):
+    order=get_or_404(db,Order,ident,True);scope(user,order.branch_id,('admin','manager'))
+    if order.method!='delivery' or order.status!='ready':raise HTTPException(409,'Only ready delivery orders can be assigned.')
+    driver=get_or_404(db,User,data.delivery_user_id)
+    if driver.role!='delivery' or not driver.active or driver.branch_id!=order.branch_id:raise HTTPException(422,'Select an active delivery person assigned to this branch.')
+    if order.assigned_delivery_user_id==driver.id:return order_view(db,order,user)
+    order.assigned_delivery_user_id=driver.id;order.delivery_assigned_at=now()
+    db.add(OrderEvent(order_id=order.id,status='delivery_assigned',actor_id=user.id,note=f'Assigned to {driver.name}.'))
+    audit(db,user,'order.delivery.assign',order.id,delivery_user_id=driver.id)
+    return order_view(db,order,user)
+
+@app.get(prefix+'/delivery/orders')
+def delivery_orders(user:User=UserDep,db:DBSession=DB):
+    require(user,('delivery',))
+    rows=db.scalars(select(Order).where(Order.assigned_delivery_user_id==user.id,Order.method=='delivery',Order.status.in_(('ready','dispatched'))).order_by(Order.delivery_assigned_at,Order.id)).all()
+    return [order_view(db,order,user) for order in rows]
+
+@app.get(prefix+'/delivery/profile')
+def delivery_profile(user:User=UserDep,db:DBSession=DB):
+    require(user,('delivery',))
+    branch=db.get(Branch,user.branch_id) if user.branch_id else None
+    base=select(func.count()).select_from(Order).where(Order.assigned_delivery_user_id==user.id,Order.method=='delivery')
+    return {'name':user.name,'email':user.email,'phone':user.phone,'branch_name':branch.name if branch else None,
+        'completed':db.scalar(base.where(Order.status=='completed')),
+        'active':db.scalar(base.where(Order.status.in_(('ready','dispatched')))),
+        'failed_attempts':db.scalar(select(func.count()).select_from(OrderEvent).where(OrderEvent.actor_id==user.id,OrderEvent.status=='delivery_failed'))}
+
+@app.get(prefix+'/delivery/history')
+def delivery_history(status:str=Query(default='all',pattern='^(all|completed|cancelled|rejected)$'),page:int=Query(default=1,ge=1),user:User=UserDep,db:DBSession=DB):
+    require(user,('delivery',))
+    query=select(Order).where(Order.assigned_delivery_user_id==user.id,Order.method=='delivery',Order.status.in_(('completed','cancelled','rejected')))
+    if status!='all':query=query.where(Order.status==status)
+    total=db.scalar(select(func.count()).select_from(query.subquery()))
+    orders=db.scalars(query.order_by(Order.id.desc()).offset((page-1)*20).limit(20)).all()
+    return {'items':[order_view(db,o,user) for o in orders],'total':total,'page':page,'page_size':20}
+
+@app.post(prefix+'/delivery/orders/{ident}/start')
+def delivery_start(ident:int,user:User=UserDep,db:DBSession=DB,idempotency_key:str|None=Header(default=None)):
+    require(user,('delivery',))
+    def apply():
+        order=get_or_404(db,Order,ident,True)
+        if order.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
+        if order.status!='ready':raise HTTPException(409,'This order is not ready to start delivery.')
+        if not order.reserved_active:raise HTTPException(409,'Reserved stock is no longer active.')
+        items=db.scalars(select(OrderItem).where(OrderItem.order_id==order.id)).all();stocks=lock_stock(db,order.branch_id,[x.variant_id for x in items])
+        for item in items:
+            stock=stocks[item.variant_id];stock.on_hand-=item.quantity;stock.reserved-=item.quantity
+            db.add(Movement(branch_id=order.branch_id,variant_id=item.variant_id,delta=-item.quantity,kind='order_fulfilment',reference=f'ORD-{order.id}',actor_id=user.id))
+        order.reserved_active=False;order.status='dispatched'
+        db.add(OrderEvent(order_id=order.id,status='dispatched',actor_id=user.id,note='Delivery person started the trip.'))
+        audit(db,user,'delivery.start',order.id);return order_view(db,order,user)
+    return idempotent(db,user,f'delivery.start.{ident}',idempotency_key,{},apply)
+
+@app.post(prefix+'/delivery/orders/{ident}/complete')
+def delivery_complete(ident:int,data:DeliveryCompleteIn,user:User=UserDep,db:DBSession=DB,idempotency_key:str|None=Header(default=None)):
+    require(user,('delivery',))
+    def apply():
+        order=get_or_404(db,Order,ident,True)
+        if order.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
+        if order.status!='dispatched':raise HTTPException(409,'Start this delivery before completing it.')
+        if not secrets.compare_digest(order.pickup_code,data.otp):raise HTTPException(422,'Enter the correct customer delivery OTP.')
+        if order.payment_status!='paid':raise HTTPException(409,'Record cash collection before completing delivery.')
+        order.status='completed';db.add(OrderEvent(order_id=order.id,status='completed',actor_id=user.id,note='Delivered after customer OTP verification.'))
+        audit(db,user,'delivery.complete',order.id);return {'id':order.id,'status':'completed'}
+    return idempotent(db,user,f'delivery.complete.{ident}',idempotency_key,data.model_dump(),apply)
+
+@app.post(prefix+'/delivery/orders/{ident}/failed')
+def delivery_failed(ident:int,data:DeliveryFailureIn,user:User=UserDep,db:DBSession=DB):
+    require(user,('delivery',));order=get_or_404(db,Order,ident,True)
+    if order.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
+    if order.status!='dispatched':raise HTTPException(409,'Only an active delivery can be marked unsuccessful.')
+    reason=data.reason.strip();db.add(OrderEvent(order_id=order.id,status='delivery_failed',actor_id=user.id,note=reason));audit(db,user,'delivery.failed',order.id,reason=reason)
     return {'ok':True}
+
+@app.post(prefix+'/delivery/orders/{ident}/location')
+def delivery_location(ident:int,data:DeliveryLocationIn,user:User=UserDep,db:DBSession=DB):
+    require(user,('delivery',));order=get_or_404(db,Order,ident,True)
+    if order.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
+    if order.status!='dispatched':raise HTTPException(409,'Location sharing is available only during an active delivery.')
+    order.driver_latitude=Decimal(str(data.latitude));order.driver_longitude=Decimal(str(data.longitude));order.driver_location_updated_at=now()
+    return {'ok':True,'updated_at':order.driver_location_updated_at}
+
+@app.get(prefix+'/orders/{ident}/tracking')
+def order_tracking(ident:int,user:User=UserDep,db:DBSession=DB):
+    order=get_or_404(db,Order,ident)
+    if order.method!='delivery':raise HTTPException(409,'Tracking is available only for delivery orders.')
+    if user.role=='delivery':
+        if order.assigned_delivery_user_id!=user.id:raise HTTPException(404,'Delivery not found.')
+    else:scope(user,order.branch_id,('admin','manager'))
+    driver=db.get(User,order.assigned_delivery_user_id) if order.assigned_delivery_user_id else None
+    return {'id':order.id,'number':f'ORD-{order.id:06d}','status':order.status,'display_status':order_view(db,order,user)['display_status'],'branch_name':db.get(Branch,order.branch_id).name,'driver_name':driver.name if driver else None,'destination_latitude':str(order.latitude) if order.latitude is not None else None,'destination_longitude':str(order.longitude) if order.longitude is not None else None,'driver_latitude':str(order.driver_latitude) if order.driver_latitude is not None else None,'driver_longitude':str(order.driver_longitude) if order.driver_longitude is not None else None,'location_updated_at':order.driver_location_updated_at,'events':[row(x) for x in db.scalars(select(OrderEvent).where(OrderEvent.order_id==order.id).order_by(OrderEvent.id)).all()]}
+
+@app.get(prefix+'/delivery/operations')
+def delivery_operations(branch_id:int|None=Query(default=None,gt=0),driver_id:int|None=Query(default=None,gt=0),status:str='all',from_date:Date|None=None,to_date:Date|None=None,search:str=Query(default='',max_length=100),page:int=Query(default=1,ge=1),page_size:int=Query(default=25,ge=1,le=100),user:User=UserDep,db:DBSession=DB):
+    return operations_report(db,user,branch_id,driver_id,status,from_date,to_date,search,page,page_size)
+
+@app.get(prefix+'/delivery/operations/{ident}')
+def delivery_operations_detail(ident:int,user:User=UserDep,db:DBSession=DB):
+    require(user,('admin','manager'))
+    order=get_or_404(db,Order,ident)
+    report=operations_detail(db,user,order)
+    return {**order_view(db,order,user),**report}
+
+@app.get(prefix+'/delivery/management')
+def delivery_management(branch_id:int|None=None,user:User=UserDep,db:DBSession=DB):
+    require(user,('admin','manager'))
+    if user.role=='manager':branch_id=user.branch_id
+    q=select(Order).where(Order.method=='delivery',Order.status.in_(('ready','dispatched','completed')))
+    if branch_id:q=q.where(Order.branch_id==branch_id)
+    result=[]
+    for order in db.scalars(q.order_by(Order.id.desc()).limit(200)).all():
+        customer=db.get(User,order.user_id);driver=db.get(User,order.assigned_delivery_user_id) if order.assigned_delivery_user_id else None
+        result.append({'id':order.id,'number':f'ORD-{order.id:06d}','branch_name':db.get(Branch,order.branch_id).name,'customer_name':customer.name,'customer_phone':order.phone,'address':order.address,'destination_latitude':str(order.latitude) if order.latitude is not None else None,'destination_longitude':str(order.longitude) if order.longitude is not None else None,'status':order.status,'driver_name':driver.name if driver else None,'assigned_at':order.delivery_assigned_at,'driver_latitude':str(order.driver_latitude) if order.driver_latitude is not None else None,'driver_longitude':str(order.driver_longitude) if order.driver_longitude is not None else None,'location_updated_at':order.driver_location_updated_at,'created_at':order.created_at})
+    return result
 
 @app.get(prefix+'/inventory')
 def inventory(branch_id:int|None=None,threshold:Decimal|None=Query(default=None,ge=0,le=100000),comparison:str|None=Query(default=None,pattern='^(lt|gt)$'),user:User=UserDep,db:DBSession=DB):
@@ -376,6 +565,8 @@ def pos_customer_lookup(mobile:str=Query(pattern=r'^[6-9][0-9]{9}$'),user:User=U
 @app.get(prefix+'/pos/scan')
 def pos_scan(code:str=Query(min_length=2,max_length=60),branch_id:int=Query(gt=0),user:User=UserDep,db:DBSession=DB):
     scope(user,branch_id,('manager','cashier'))
+    shift=db.scalar(select(Shift.id).where(Shift.actor_id==user.id,Shift.branch_id==branch_id,Shift.closed_at==None))
+    if shift is None:raise HTTPException(409,'Open your cashier shift before adding products to the bill.')
     branch=get_or_404(db,Branch,branch_id)
     if not branch.active:raise HTTPException(409,'This branch is inactive.')
     clean=code.strip()
@@ -601,6 +792,11 @@ def purchase_receive(ident:int,data:PurchaseReceiveIn,user:User=UserDep,db:DBSes
         return {'ok':True,'unit_cost':str(p.unit_cost)}
     return idempotent(db,user,f'purchase.receive.{ident}',idempotency_key,data.model_dump(mode='json'),apply)
 
+@app.get(prefix+'/admin/product-categories')
+def product_categories(user:User=UserDep,db:DBSession=DB):
+    require(user,('admin',))
+    return list(db.scalars(select(Product.category).distinct().order_by(Product.category)).all())
+
 @app.post(prefix+'/admin/products')
 def product_create(data:ProductIn,user:User=UserDep,db:DBSession=DB):
     require(user,('admin',));p=Product(**data.model_dump(exclude={'variants'}));db.add(p);db.flush()
@@ -609,6 +805,38 @@ def product_create(data:ProductIn,user:User=UserDep,db:DBSession=DB):
         for b in db.scalars(select(Branch)).all():db.add(Stock(branch_id=b.id,variant_id=v.id,on_hand=0,reserved=0,damaged=0))
     audit(db,user,'product.create',p.id)
     return {'id':p.id,'code':product_code(p)}
+
+@app.put(prefix+'/admin/products/{ident}')
+def product_update(ident:int,data:ProductUpdateIn,user:User=UserDep,db:DBSession=DB):
+    require(user,('admin',))
+    product=get_or_404(db,Product,ident,True)
+    existing={v.id:v for v in db.scalars(select(Variant).where(Variant.product_id==ident).with_for_update()).all()}
+    ids=[v.id for v in data.variants if v.id is not None]
+    if len(ids)!=len(set(ids)) or set(ids)!=set(existing):
+        raise HTTPException(422,'Include every existing selling option exactly once. Options cannot be deleted or moved between products.')
+    skus=[v.sku for v in data.variants]
+    if len(skus)!=len(set(skus)):
+        raise HTTPException(422,'Each selling option needs a unique SKU / barcode.')
+    for entry in data.variants:
+        duplicate=db.scalar(select(Variant.id).where(Variant.sku==entry.sku,Variant.id!=entry.id) if entry.id else select(Variant.id).where(Variant.sku==entry.sku))
+        if duplicate:
+            raise HTTPException(422,'This SKU / barcode is already used by another selling option.')
+        if entry.id and existing[entry.id].unit!=entry.unit:
+            used=any(db.scalar(select(model.id).where(model.variant_id==entry.id).limit(1)) for model in (Movement,SaleItem,OrderItem))
+            stock=db.scalar(select(Stock.id).where(Stock.variant_id==entry.id,or_(Stock.on_hand!=0,Stock.reserved!=0,Stock.damaged!=0)).limit(1))
+            if used or stock:
+                raise HTTPException(422,'The unit cannot change after stock or transaction activity. Add a new selling option instead.')
+    for key,value in data.model_dump(exclude={'variants'}).items():setattr(product,key,value)
+    for entry in data.variants:
+        values=entry.model_dump(exclude={'id'})
+        if entry.id:
+            for key,value in values.items():setattr(existing[entry.id],key,value)
+        else:
+            variant=Variant(product_id=ident,**values);db.add(variant);db.flush()
+            for branch in db.scalars(select(Branch)).all():
+                db.add(Stock(branch_id=branch.id,variant_id=variant.id,on_hand=0,reserved=0,damaged=0))
+    audit(db,user,'product.update',product.id)
+    return {'id':product.id,'code':product_code(product)}
 
 @app.get(prefix+'/admin/products/import-template')
 def product_import_template(user:User=UserDep):
@@ -664,7 +892,7 @@ def archive(ident:int,user:User=UserDep,db:DBSession=DB):
 
 @app.post(prefix+'/admin/branches')
 def branch_create(data:BranchIn,user:User=UserDep,db:DBSession=DB):
-    require(user,('admin',));b=Branch(**data.model_dump());db.add(b);db.flush()
+    require(user,('admin',));values=data.model_dump();values['delivery_slabs']=data.model_dump(mode='json')['delivery_slabs'];b=Branch(**values);db.add(b);db.flush()
     for v in db.scalars(select(Variant)).all():db.add(Stock(branch_id=b.id,variant_id=v.id,on_hand=0,reserved=0,damaged=0))
     audit(db,user,'branch.create',b.id)
     return row(b)
@@ -672,14 +900,19 @@ def branch_create(data:BranchIn,user:User=UserDep,db:DBSession=DB):
 @app.put(prefix+'/admin/branches/{ident}')
 def branch_update(ident:int,data:BranchIn,user:User=UserDep,db:DBSession=DB):
     require(user,('admin',));b=get_or_404(db,Branch,ident,True)
-    for k,v in data.model_dump().items():setattr(b,k,v)
+    values=data.model_dump();values['delivery_slabs']=data.model_dump(mode='json')['delivery_slabs']
+    for k,v in values.items():setattr(b,k,v)
     audit(db,user,'branch.update',ident)
     return row(b)
 
 @app.get(prefix+'/admin/users')
-def users(user:User=UserDep,db:DBSession=DB):
+def users(branch_id:int|None=Query(default=None,gt=0),user:User=UserDep,db:DBSession=DB):
     require(user,('admin',))
-    return [user_view(u) for u in db.scalars(select(User).where(User.role!='customer').order_by(User.id)).all()]
+    query=select(User).where(User.role!='customer')
+    if branch_id is not None:
+        get_or_404(db,Branch,branch_id)
+        query=query.where(User.branch_id==branch_id)
+    return [user_view(u) for u in db.scalars(query.order_by(User.id)).all()]
 
 @app.post(prefix+'/admin/users')
 def staff_create(data:StaffIn,user:User=UserDep,db:DBSession=DB):
@@ -691,7 +924,7 @@ def staff_create(data:StaffIn,user:User=UserDep,db:DBSession=DB):
 @app.put(prefix+'/admin/users/{ident}')
 def staff_update(ident:int,data:StaffUpdateIn,user:User=UserDep,db:DBSession=DB):
     require(user,('admin',));u=get_or_404(db,User,ident,True)
-    if u.role in ('admin','customer'):raise HTTPException(409,'Only manager, cashier, and inventory accounts can be edited here.')
+    if u.role in ('admin','customer'):raise HTTPException(409,'Only manager, cashier, inventory, and delivery accounts can be edited here.')
     get_or_404(db,Branch,data.branch_id)
     email=data.email.strip().lower()
     if '@' not in email or '.' not in email.split('@')[-1]:raise HTTPException(422,'Enter a valid email address.')

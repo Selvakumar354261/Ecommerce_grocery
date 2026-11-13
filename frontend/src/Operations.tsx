@@ -2,6 +2,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert,
+  Autocomplete,
   Badge,
   Box,
   Button,
@@ -51,6 +52,8 @@ import type {
 } from "./types";
 import { Loading } from "./App";
 import { useConfirmDialog } from "./ConfirmDialog";
+import DeliveryManagement from "./DeliveryManagement";
+import OrderPaymentPanel, { OrderPaymentSummary } from "./OrderPayment";
 
 type RecordData = Record<string, unknown>;
 type Column<T> = { label: string; value: (row: T) => React.ReactNode };
@@ -223,6 +226,7 @@ export function Operations() {
     { id: "pos", name: "Point of sale", icon: <PointOfSaleOutlined /> },
     { id: "shifts", name: "Cashier shifts", icon: <PointOfSaleOutlined /> },
     { id: "orders", name: "Online orders", icon: <ReceiptLongOutlined /> },
+    { id: "deliveries", name: "Delivery management", icon: <ReceiptLongOutlined /> },
     { id: "inventory", name: "Inventory", icon: <Inventory2Outlined /> },
     { id: "counts", name: "Stock counts", icon: <Inventory2Outlined /> },
     { id: "transfers", name: "Stock transfers", icon: <SwapHorizOutlined /> },
@@ -242,6 +246,7 @@ export function Operations() {
     "shifts",
     "products",
     "orders",
+    "deliveries",
     "inventory",
     "counts",
     "transfers",
@@ -252,7 +257,7 @@ export function Operations() {
     "audit",
   ];
   const nav = navItems
-    .filter((x) => allowed.includes(x.id))
+    .filter((x) => allowed.includes(x.id) && x.id !== "audit")
     .sort((a, b) =>
       user?.role === "admin"
         ? adminOrder.indexOf(a.id) - adminOrder.indexOf(b.id)
@@ -274,6 +279,7 @@ export function Operations() {
             to={"/workspace/" + n.id}
             key={n.id}
             className={"nav-item " + (path === n.id ? "active" : "")}
+            aria-current={path === n.id ? "page" : undefined}
           >
             {n.icon}
             {n.name}
@@ -337,6 +343,8 @@ export function Operations() {
           <StockCounts branch={branch} />
         ) : path === "orders" ? (
           <BranchOrders branch={branch} />
+        ) : path === "deliveries" ? (
+          <DeliveryManagement branch={branch} />
         ) : path === "inventory" ? (
           <Inventory branch={branch} />
         ) : path === "transfers" ? (
@@ -350,7 +358,7 @@ export function Operations() {
         ) : path === "branches" ? (
           <Branches branches={branches.data || []} />
         ) : path === "users" ? (
-          <Users branches={branches.data || []} />
+          <Users branches={branches.data || []} selectedBranch={branch} />
         ) : path === "customers" ? (
           <Customers />
         ) : path === "settings" ? (
@@ -380,11 +388,11 @@ function DashboardPage({ branch }: { branch: number }) {
   return (
     <>
       <Heading
-        title="A clear view of your business"
+        title="Business overview"
         subtitle={
           all
-            ? "Consolidated performance across every branch."
-            : "Sales and operational priorities for this branch."
+            ? "Sales, orders, and stock across all branches."
+            : "Sales, orders, and stock for the selected branch."
         }
       />
       {query.isError && <Alert severity="error">{query.error.message}</Alert>}
@@ -395,24 +403,24 @@ function DashboardPage({ branch }: { branch: number }) {
           <div className="metric-grid">
             {[
               {
-                name: "Net realised sales",
+                name: "Total sales",
                 value: money(d.net_sales),
-                note: "All-time · after POS refunds",
+                note: "POS + completed online orders (after POS refunds)",
               },
               {
-                name: "POS sales",
+                name: "In-store sales",
                 value: money(d.pos_sales),
-                note: `${d.sales_count} physical transactions`,
+                note: `${d.sales_count} bills since the beginning; refunds deducted`,
               },
               {
-                name: "Orders to fulfil",
+                name: "Pending online orders",
                 value: d.pending_orders,
                 note: `${d.orders_count} online orders in total`,
               },
               {
-                name: "Stock attention",
+                name: "Low-stock items",
                 value: d.low_stock,
-                note: "Branch variants at reorder level",
+                note: "Product options at or below their restock limit, counted per branch",
               },
             ].map((m, i) => (
               <Paper
@@ -434,11 +442,11 @@ function DashboardPage({ branch }: { branch: number }) {
                     Sales over the last 7 days
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    POS and completed online orders · IST
+                    In-store and completed online sales · India time
                   </Typography>
                 </div>
                 <Stack direction="row" spacing={1}>
-                  <Chip size="small" label="POS" />
+                  <Chip size="small" label="In-store" />
                   <Chip size="small" color="primary" label="Online" />
                 </Stack>
               </Stack>
@@ -519,6 +527,8 @@ function DashboardPage({ branch }: { branch: number }) {
 }
 
 function POS({ branch }: { branch: number }) {
+  const [shiftAlert, setShiftAlert] = useState(false);
+  const alertedShiftBranch = useRef<number | null>(null);
   type ScanResult = {
     variant_id: number;
     sku: string;
@@ -569,6 +579,7 @@ function POS({ branch }: { branch: number }) {
   const shifts = useQuery({
     queryKey: ["shifts", branch],
     queryFn: () => api<Shift[]>(`/shifts?branch_id=${branch}`),
+    refetchInterval: 5000,
   });
   useEffect(() => {
     const code = barcode.trim();
@@ -599,6 +610,16 @@ function POS({ branch }: { branch: number }) {
   const hasShift = shifts.data?.some(
     (s) => s.actor_id === user?.id && !s.closed_at,
   );
+  useEffect(() => {
+    if (!shifts.isSuccess) return;
+    if (hasShift) {
+      alertedShiftBranch.current = null;
+      setShiftAlert(false);
+    } else if (alertedShiftBranch.current !== branch) {
+      alertedShiftBranch.current = branch;
+      setShiftAlert(true);
+    }
+  }, [branch, hasShift, shifts.isSuccess]);
   const variants = catalogue.flatMap((p) =>
     p.variants.map((v) => ({ ...v, name: p.name, category: p.category })),
   );
@@ -616,22 +637,12 @@ function POS({ branch }: { branch: number }) {
     keyRef.current = "";
   }, [JSON.stringify(cart)]);
   function add(id: number) {
+    if (!hasShift) { notify("Open your cashier shift before adding products to the bill."); return; }
     const v = variants.find((x) => x.id === id)!;
-    setCart((current) =>
-      current.some((x) => x.variant_id === id)
-        ? current.map((x) =>
-            x.variant_id === id
-              ? {
-                  ...x,
-                  quantity: Number((x.quantity + Number(v.step)).toFixed(3)),
-                }
-              : x,
-          )
-        : [...current, { variant_id: id, quantity: Number(v.min_qty) }],
-    );
-    setSearch("");
+    void scan(v.sku);
   }
   async function scan(value = barcode) {
+    if (!hasShift) { notify("Open your cashier shift before adding products to the bill."); return; }
     const code = value.trim();
     if (!code || scanBusy) return;
     setScanBusy(true);
@@ -700,6 +711,7 @@ function POS({ branch }: { branch: number }) {
     return "";
   }
   function addLoose() {
+    if (!hasShift) { notify("Open your cashier shift before adding products to the bill."); return; }
     if (!pendingLoose) return;
     const validation = looseValidation();
     if (validation) return;
@@ -746,8 +758,7 @@ function POS({ branch }: { branch: number }) {
                 ].filter((payment) => Number(payment.amount) > 0)
               : undefined,
           amount_tendered:
-            paymentMethod === "cash" ||
-            (paymentMethod === "split" && Number(splitCash) > 0)
+            paymentMethod === "cash"
               ? amountTendered
               : undefined,
           expected_subtotal: total.toFixed(2),
@@ -778,6 +789,7 @@ function POS({ branch }: { branch: number }) {
     notify("Bill held on this device. Resume before holding another bill.");
   }
   function resume() {
+    if (!hasShift) { notify("Open your cashier shift before resuming a bill."); return; }
     if (cart.length) {
       notify("Clear or finish the current bill first.");
       return;
@@ -799,10 +811,7 @@ function POS({ branch }: { branch: number }) {
       ? amountTendered !== "" && Number(amountTendered) >= total
       : paymentMethod === "split"
         ? splitMethods >= 2 &&
-          Math.abs(splitTotal - total) < 0.005 &&
-          (Number(splitCash || 0) === 0 ||
-            (amountTendered !== "" &&
-              Number(amountTendered) >= Number(splitCash)))
+          Math.abs(splitTotal - total) < 0.005
         : true;
   const customerValid =
     /^[6-9][0-9]{9}$/.test(customerMobile) &&
@@ -815,13 +824,25 @@ function POS({ branch }: { branch: number }) {
         subtitle="Scan, add, and bill. Prices and stock are checked on completion."
         action={<Chip label="POS billing" color="primary" variant="outlined" />}
       />
+      <Dialog open={shiftAlert} onClose={() => setShiftAlert(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Open your cashier shift</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning">
+            Your cashier shift is not open. Open a shift before adding products, scanning barcodes, or completing a bill.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShiftAlert(false)}>Close</Button>
+          <Button component={Link} to="/workspace/shifts" variant="contained">Go to cashier shifts</Button>
+        </DialogActions>
+      </Dialog>
       {!hasShift && (
         <Alert severity="warning" sx={{ mb: 2 }}>
           Open your{" "}
           <Link to="/workspace/shifts">
             <strong>cashier shift</strong>
           </Link>{" "}
-          before completing sales.
+          before adding products or completing sales.
         </Alert>
       )}
       <div className="pos-grid">
@@ -840,7 +861,7 @@ function POS({ branch }: { branch: number }) {
                   void scan(barcode);
                 }
               }}
-              disabled={scanBusy}
+              disabled={scanBusy || !hasShift}
               helperText="Scan continuously—each barcode is added automatically without pressing Enter."
               slotProps={{
                 input: {
@@ -888,7 +909,7 @@ function POS({ branch }: { branch: number }) {
                     <b>{money(v.price)}</b>
                     <Button
                       onClick={() => add(v.id)}
-                      disabled={!s || Number(s.available) < Number(v.min_qty)}
+                      disabled={!hasShift || scanBusy || !s || Number(s.available) < Number(v.min_qty)}
                     >
                       Add +
                     </Button>
@@ -1059,13 +1080,11 @@ function POS({ branch }: { branch: number }) {
               </Typography>
               <Stack spacing={1.5}>
                 <TextField type="number" label="Cash portion" value={splitCash} onChange={(e) => setSplitCash(e.target.value)} inputProps={{ min: 0, step: 0.01 }} />
-                {Number(splitCash) > 0 && <TextField type="number" label="Actual cash received" value={amountTendered} onChange={(e) => setAmountTendered(e.target.value)} inputProps={{ min: Number(splitCash), step: 0.01 }} />}
                 <TextField type="number" label="Card portion" value={splitCard} onChange={(e) => setSplitCard(e.target.value)} inputProps={{ min: 0, step: 0.01 }} />
                 <TextField type="number" label="UPI portion" value={splitUpi} onChange={(e) => setSplitUpi(e.target.value)} inputProps={{ min: 0, step: 0.01 }} />
                 <Alert severity={paymentValid ? "success" : "warning"}>
                   Allocated: {money(splitTotal)} · Remaining: {money(Math.max(0, total - splitTotal))}
                   {splitTotal > total ? ` · Excess allocation: ${money(splitTotal - total)}` : ""}
-                  {Number(splitCash) > 0 && amountTendered !== "" && Number(amountTendered) >= Number(splitCash) ? ` · Cash balance: ${money(Number(amountTendered) - Number(splitCash))}` : ""}
                 </Alert>
               </Stack>
             </Paper>
@@ -1326,6 +1345,7 @@ function OnlineReceipt({
               <strong>Total paid · ONLINE</strong>
               <strong>{money(order.total)}</strong>
             </div>
+            {order.payment_collection && <OrderPaymentSummary collection={order.payment_collection} />}
             <p>
               {order.method === "delivery"
                 ? `Delivered to: ${order.address}`
@@ -1358,6 +1378,7 @@ function BranchOrders({ branch }: { branch: number }) {
     [deliveryDays, setDeliveryDays] = useState(""),
     [rejectionReason, setRejectionReason] = useState(""),
     [rejectOpen, setRejectOpen] = useState(false),
+    [deliveryUser, setDeliveryUser] = useState(""),
     [busy, setBusy] = useState(false);
   const confirmation = useConfirmDialog();
   const query = useQuery({
@@ -1367,6 +1388,11 @@ function BranchOrders({ branch }: { branch: number }) {
     refetchInterval: 15000,
   });
   const current = query.data?.find((o) => o.id === selected?.id) || selected;
+  const deliveryStaff = useQuery({
+    queryKey: ["delivery-staff", current?.branch_id],
+    queryFn: () => api<User[]>(`/delivery/staff?branch_id=${current!.branch_id}`),
+    enabled: !!current && current.method === "delivery" && current.status === "ready",
+  });
   async function action(action: string) {
     if (!current) return;
     if (action === "reject") {
@@ -1426,19 +1452,15 @@ function BranchOrders({ branch }: { branch: number }) {
       setBusy(false);
     }
   }
-  async function paid() {
-    if (
-      !current ||
-      !(await confirmation.ask(
-        `Confirm that ${money(current.total)} cash has been collected?`,
-        { title: "Record cash payment", confirmLabel: "Confirm collection" },
-      ))
-    )
-      return;
+  async function assignDelivery() {
+    if (!current || !deliveryUser) return;
     setBusy(true);
     try {
-      await post(`/orders/${current.id}/payment`);
+      await post(`/orders/${current.id}/assign-delivery`, {
+        delivery_user_id: Number(deliveryUser),
+      });
       await qc.invalidateQueries();
+      notify("Delivery person assigned.");
     } catch (err) {
       notify((err as Error).message);
     } finally {
@@ -1611,6 +1633,7 @@ function BranchOrders({ branch }: { branch: number }) {
                   setDeliveryCharge("");
                   setDeliveryDays("");
                   setRejectionReason("");
+                  setDeliveryUser(String(o.assigned_delivery_user_id || ""));
                 }}
               >
                 Open order
@@ -1738,6 +1761,7 @@ function BranchOrders({ branch }: { branch: number }) {
                 <span>Total including delivery</span>
                 <strong>{money(current.total)}</strong>
               </div>
+              <OrderPaymentPanel key={current.id} order={current} />
               {current.expires_at && current.status === "placed" && (
                 <Alert severity="warning">
                   Confirm before {date(current.expires_at)} to retain the
@@ -1755,6 +1779,19 @@ function BranchOrders({ branch }: { branch: number }) {
                   error={code.length > 0 && code.length !== 6}
                   helperText="Enter the customer's six-digit pickup code."
                 />
+              )}
+              {current.method === "delivery" && current.status === "ready" && (
+                <TextField
+                  select
+                  label="Assign delivery person"
+                  value={deliveryUser}
+                  onChange={(e) => setDeliveryUser(e.target.value)}
+                  helperText={deliveryStaff.data?.length ? "The assigned order will appear in the delivery app." : "Create an active delivery staff account for this branch first."}
+                >
+                  {(deliveryStaff.data || []).map((driver) => (
+                    <MenuItem value={driver.id} key={driver.id}>{driver.name}</MenuItem>
+                  ))}
+                </TextField>
               )}
               <Typography variant="subtitle2">Order history</Typography>
               {current.events.map((e) => (
@@ -1823,24 +1860,10 @@ function BranchOrders({ branch }: { branch: number }) {
                 </Button>
               )}
               {current.status === "ready" && current.method === "delivery" && (
-                <Button
-                  disabled={busy}
-                  variant="contained"
-                  onClick={() => void action("dispatch")}
-                >
-                  Dispatch
+                <Button disabled={busy || !deliveryUser} variant="contained" onClick={() => void assignDelivery()}>
+                  {current.assigned_delivery_user_id ? "Update assignment" : "Assign delivery"}
                 </Button>
               )}
-              {["ready", "dispatched"].includes(current.status) &&
-                current.payment_status === "unpaid" && (
-                  <Button
-                    disabled={busy}
-                    variant="outlined"
-                    onClick={() => void paid()}
-                  >
-                    Record cash collected
-                  </Button>
-                )}
               {current.status === "ready" && current.method === "pickup" && (
                 <Button
                   disabled={
@@ -3535,6 +3558,7 @@ function Purchases({ branch }: { branch: number }) {
 }
 
 type DraftVariant = {
+  id?: number;
   sku: string;
   label: string;
   unit: string;
@@ -3555,7 +3579,12 @@ const newVariant = (): DraftVariant => ({
 function Products() {
   const { catalogue, notify } = useApp(),
     qc = useQueryClient();
+  const categories = useQuery({
+    queryKey: ["product-categories"],
+    queryFn: () => api<string[]>("/admin/product-categories"),
+  });
   const [open, setOpen] = useState(false),
+    [editingProduct, setEditingProduct] = useState<Product | null>(null),
     [name, setName] = useState(""),
     [category, setCategory] = useState("Rice"),
     [description, setDescription] = useState(""),
@@ -3576,7 +3605,11 @@ function Products() {
   async function create() {
     setBusy(true);
     try {
-      await post("/admin/products", {
+      if (editingProduct) await api(`/admin/products/${editingProduct.id}`, {
+        method: "PUT",
+        body: JSON.stringify({name, category, description, tone, variants}),
+      });
+      else await post("/admin/products", {
         name,
         category,
         description,
@@ -3588,7 +3621,7 @@ function Products() {
       setDescription("");
       setVariants([newVariant()]);
       await qc.invalidateQueries();
-      notify("Product created. Receive stock before selling.");
+      notify(editingProduct ? "Product updated." : "Product created. Receive stock before selling.");
     } catch (err) {
       notify((err as Error).message);
     } finally {
@@ -3636,7 +3669,11 @@ function Products() {
           <Button
             variant="contained"
             startIcon={<Add />}
-            onClick={() => setOpen(true)}
+            onClick={() => {
+              setEditingProduct(null);
+              setName(""); setCategory(""); setDescription(""); setTone("sage");
+              setVariants([newVariant()]); setOpen(true);
+            }}
           >
             Add product
           </Button>
@@ -3691,9 +3728,16 @@ function Products() {
           {
             label: "Action",
             value: (p) => (
+              <Stack direction="row" spacing={1}>
+              <Button onClick={() => {
+                setEditingProduct(p); setName(p.name); setCategory(p.category);
+                setDescription(p.description); setTone(p.tone); setOpen(true);
+                setVariants(p.variants.map(v => ({...v})));
+              }}>Edit product</Button>
               <Button color="error" onClick={() => void archive(p)}>
                 Archive
               </Button>
+              </Stack>
             ),
           },
         ]}
@@ -3704,24 +3748,34 @@ function Products() {
         fullWidth
         maxWidth="md"
       >
-        <DialogTitle>Add product and selling options</DialogTitle>
+        <DialogTitle>{editingProduct ? "Edit product" : "Add product and selling options"}</DialogTitle>
         <DialogContent>
-          <Stack spacing={2} sx={{ pt: 1 }}>
+          <Stack spacing={2} sx={{ pt: 1, "& .MuiFormLabel-asterisk": { color: "error.main" } }}>
+            <Typography variant="body2" color="text.secondary">
+              Fields marked with * are required. Suggested values are already filled in where available.
+            </Typography>
             <TextField
               label="Product name"
+              required
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
             <Stack direction="row" spacing={2}>
-              <TextField
-                label="Category"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
+              <Autocomplete
+                freeSolo
                 fullWidth
+                options={categories.data || []}
+                inputValue={category}
+                onInputChange={(_, value) => setCategory(value)}
+                onChange={(_, value) => setCategory(value || "")}
+                loading={categories.isLoading}
+                renderInput={(params) => <TextField {...params} label="Category" required
+                  helperText={categories.isError ? "Could not load categories. You can still enter a new category." : "Select an existing category or type a new one."} />}
               />
               <TextField
                 select
                 label="Packaging colour"
+                required
                 value={tone}
                 onChange={(e) => setTone(e.target.value)}
                 fullWidth
@@ -3734,11 +3788,12 @@ function Products() {
               </TextField>
             </Stack>
             <TextField
-              label="Description"
+              label="Description (optional)"
               multiline
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
+            <>
             <Alert severity="info">
               Sealed packs use whole quantities. Loose goods use kg or litres.
               Each selling option has its own stock; pack opening does not
@@ -3751,12 +3806,14 @@ function Products() {
                     <TextField
                       fullWidth
                       label="Unique SKU / barcode"
+                      required
                       value={v.sku}
                       onChange={(e) => update(i, "sku", e.target.value)}
                     />
                     <TextField
                       fullWidth
                       label="Option label (e.g. 1 kg sealed pack)"
+                      required
                       value={v.label}
                       onChange={(e) => update(i, "label", e.target.value)}
                     />
@@ -3766,6 +3823,7 @@ function Products() {
                       select
                       fullWidth
                       label="Selling unit"
+                      required
                       value={v.unit}
                       onChange={(e) => {
                         const value = e.target.value;
@@ -3798,6 +3856,7 @@ function Products() {
                     <TextField
                       fullWidth
                       label="Price per unit"
+                      required
                       type="number"
                       value={v.price}
                       onChange={(e) => update(i, "price", e.target.value)}
@@ -3807,6 +3866,7 @@ function Products() {
                     {(["min_qty", "step", "max_qty"] as const).map((k) => (
                       <TextField
                         key={k}
+                        required
                         label={
                           {
                             min_qty: "Minimum qty",
@@ -3821,7 +3881,7 @@ function Products() {
                       />
                     ))}
                   </Stack>
-                  {variants.length > 1 && (
+                  {variants.length > 1 && !v.id && (
                     <Button
                       color="error"
                       onClick={() =>
@@ -3837,6 +3897,7 @@ function Products() {
             <Button onClick={() => setVariants([...variants, newVariant()])}>
               Add another pack or loose option
             </Button>
+            </>
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -3846,11 +3907,12 @@ function Products() {
             disabled={
               busy ||
               name.length < 2 ||
+              category.trim().length < 2 ||
               variants.some((v) => !v.sku || !v.label || Number(v.price) <= 0)
             }
             onClick={() => void create()}
           >
-            Create product
+            {editingProduct ? "Save changes" : "Create product"}
           </Button>
         </DialogActions>
       </Dialog>
@@ -3896,6 +3958,7 @@ const emptyBranch = {
   active: true,
 };
 function Branches({ branches }: { branches: Branch[] }) {
+  const [deliverySlabs, setDeliverySlabs] = useState<{up_to_km:string;fee:string}[]>([]);
   const { notify } = useApp(),
     qc = useQueryClient();
   const [open, setOpen] = useState(false),
@@ -3907,6 +3970,7 @@ function Branches({ branches }: { branches: Branch[] }) {
     try {
       const data = {
         ...form,
+        delivery_slabs: deliverySlabs,
         latitude: Number(form.latitude),
         longitude: Number(form.longitude),
       };
@@ -3926,6 +3990,7 @@ function Branches({ branches }: { branches: Branch[] }) {
     }
   }
   function edit(b: Branch) {
+    setDeliverySlabs(b.delivery_slabs || []);
     setEditing(b.id);
     setForm({
       name: b.name,
@@ -3951,6 +4016,7 @@ function Branches({ branches }: { branches: Branch[] }) {
             onClick={() => {
               setEditing(null);
               setForm(emptyBranch);
+              setDeliverySlabs([]);
               setOpen(true);
             }}
           >
@@ -3958,31 +4024,33 @@ function Branches({ branches }: { branches: Branch[] }) {
           </Button>
         }
       />
-      <div className="branch-grid">
+      <div className="branch-grid branch-management-grid">
         {branches.map((b) => (
-          <Paper key={b.id} variant="outlined" sx={{ p: 3 }}>
-            <StorefrontOutlined
-              sx={{ fontSize: 32, color: "primary.main", mb: 2 }}
-            />
+          <Paper key={b.id} variant="outlined" className="branch-management-card">
+            <div className="branch-card-header">
+              <span className="branch-card-icon"><StorefrontOutlined /></span>
+              <Chip size="small" label={!b.active ? "Inactive" : b.accepting_orders ? "Accepting orders" : "Orders paused"}
+                color={!b.active ? "default" : b.accepting_orders ? "success" : "warning"} variant="outlined" />
+            </div>
             <Typography variant="h6">{b.name}</Typography>
-            <Typography color="text.secondary" sx={{ my: 1 }}>
+            <Typography className="branch-card-address" color="text.secondary">
               {b.address}
             </Typography>
-            <Stack spacing={1}>
-              <Typography variant="body2">Hours: {b.hours}</Typography>
-              <Typography variant="body2">
-                Delivery radius: {b.radius_km} km · Fee: {money(b.delivery_fee)}
-              </Typography>
-              <Status
-                value={b.accepting_orders ? "accepting orders" : "paused"}
-              />
+            <dl className="branch-card-details">
+              <div><dt>Opening hours</dt><dd>{b.hours}</dd></div>
+              <div><dt>Delivery radius</dt><dd>{Number(b.radius_km)} km</dd></div>
+              <div><dt>Delivery pricing</dt><dd>{b.delivery_slabs?.length ? `${b.delivery_slabs.length} distance slabs` : money(b.delivery_fee)}</dd></div>
+            </dl>
+            <div className="branch-card-footer">
+              <Button size="small" component="a" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${b.latitude},${b.longitude}`)}`} target="_blank" rel="noopener noreferrer">View location ↗</Button>
               <Button variant="outlined" onClick={() => edit(b)}>
-                Configure branch
+                Edit branch
               </Button>
-            </Stack>
+            </div>
           </Paper>
         ))}
       </div>
+      {!branches.length && <Alert severity="info">No branches yet. Add your first branch to configure its location and delivery coverage.</Alert>}
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
@@ -4012,7 +4080,7 @@ function Branches({ branches }: { branches: Branch[] }) {
                     latitude: "Latitude",
                     longitude: "Longitude",
                     radius_km: "Delivery radius in km",
-                    delivery_fee: "Delivery charge",
+                    delivery_fee: "Flat delivery charge (used only without distance slabs)",
                     hours: "Displayed operating hours",
                   }[k]
                 }
@@ -4020,6 +4088,25 @@ function Branches({ branches }: { branches: Branch[] }) {
                 onChange={(e) => setForm({ ...form, [k]: e.target.value })}
               />
             ))}
+            <Paper variant="outlined" sx={{p:2}}>
+              <Typography variant="subtitle1" fontWeight={700}>Distance-based delivery charges</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{mb:2}}>
+                Add distance limits in increasing order. Each price applies above the previous limit, up to and including this limit. The first starts at 0 km. The final limit must match the delivery radius. Distances are straight-line estimates, not driving distances.
+              </Typography>
+              <Stack spacing={2}>
+                {deliverySlabs.map((slab,i) => <Stack key={i} direction={{xs:"column",sm:"row"}} spacing={1} alignItems={{sm:"center"}}>
+                  <TextField required type="number" label={i===0 ? "0 km up to (km)" : `Over ${deliverySlabs[i-1].up_to_km || "previous"} km up to (km)`}
+                    value={slab.up_to_km} inputProps={{min:0.01,max:500,step:0.01}}
+                    onChange={e=>setDeliverySlabs(deliverySlabs.map((s,index)=>index===i?{...s,up_to_km:e.target.value}:s))}/>
+                  <TextField required type="number" label="Delivery charge (₹)" value={slab.fee} inputProps={{min:0,max:10000,step:0.01}}
+                    onChange={e=>setDeliverySlabs(deliverySlabs.map((s,index)=>index===i?{...s,fee:e.target.value}:s))}/>
+                  <Button color="error" onClick={()=>setDeliverySlabs(deliverySlabs.filter((_,index)=>index!==i))}>Remove</Button>
+                </Stack>)}
+                <Button variant="outlined" disabled={deliverySlabs.length>=30} onClick={()=>setDeliverySlabs([...deliverySlabs,{up_to_km:"",fee:""}])}>Add distance slab</Button>
+                {!deliverySlabs.length && <Typography variant="caption">No slabs: the flat delivery charge applies within the branch radius.</Typography>}
+                <Typography variant="caption">Outside the delivery radius, a manager must still approve the order and enter a manual delivery charge.</Typography>
+              </Stack>
+            </Paper>
             <TextField
               select
               label="Online orders"
@@ -4061,7 +4148,7 @@ function Branches({ branches }: { branches: Branch[] }) {
   );
 }
 
-function Users({ branches }: { branches: Branch[] }) {
+function Users({ branches, selectedBranch }: { branches: Branch[]; selectedBranch: number }) {
   const { user, notify } = useApp(),
     qc = useQueryClient();
   const [open, setOpen] = useState(false),
@@ -4078,8 +4165,8 @@ function Users({ branches }: { branches: Branch[] }) {
     [busy, setBusy] = useState(false);
   const confirmation = useConfirmDialog();
   const query = useQuery({
-    queryKey: ["users"],
-    queryFn: () => api<User[]>("/admin/users"),
+    queryKey: ["users", selectedBranch],
+    queryFn: () => api<User[]>("/admin/users" + (selectedBranch ? `?branch_id=${selectedBranch}` : "")),
   });
   function add() {
     setEditing(null);
@@ -4087,7 +4174,7 @@ function Users({ branches }: { branches: Branch[] }) {
     setEmail("");
     setPassword("");
     setRole("cashier");
-    setBranch("");
+    setBranch(selectedBranch ? String(selectedBranch) : "");
     setOpen(true);
   }
   function edit(u: User) {
@@ -4261,7 +4348,7 @@ function Users({ branches }: { branches: Branch[] }) {
               value={role}
               onChange={(e) => setRole(e.target.value)}
             >
-              {["manager", "cashier", "inventory"].map((r) => (
+              {["manager", "cashier", "inventory", "delivery"].map((r) => (
                 <MenuItem key={r} value={r}>
                   {r}
                 </MenuItem>

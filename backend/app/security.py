@@ -11,10 +11,11 @@ from .models import Session, User, now
 
 ROLE_ACCESS = {
     'customer': {'permissions':['shop','orders.self'],'workspace_pages':[]},
-    'admin': {'permissions':['workspace','branch.switch','dashboard.all','orders.manage','inventory.change','inventory.adjust','counts.approve','transfers.manage','purchases.create','purchases.receive','suppliers.create','sales.return','products.manage','branches.manage','users.manage','customers.view','settings.manage','audit.view','reports.export'],'workspace_pages':['dashboard','shifts','orders','inventory','counts','transfers','purchases','sales','products','branches','users','customers','settings','audit']},
-    'manager': {'permissions':['workspace','orders.manage','inventory.change','inventory.adjust','counts.approve','transfers.manage','purchases.create','purchases.receive','sales.return','reports.export'],'workspace_pages':['dashboard','pos','shifts','orders','inventory','counts','transfers','purchases','sales']},
+    'admin': {'permissions':['workspace','branch.switch','dashboard.all','orders.manage','inventory.change','inventory.adjust','counts.approve','transfers.manage','purchases.create','purchases.receive','suppliers.create','sales.return','products.manage','branches.manage','users.manage','customers.view','settings.manage','audit.view','reports.export'],'workspace_pages':['dashboard','shifts','orders','deliveries','inventory','counts','transfers','purchases','sales','products','branches','users','customers','settings','audit']},
+    'manager': {'permissions':['workspace','orders.manage','inventory.change','inventory.adjust','counts.approve','transfers.manage','purchases.create','purchases.receive','sales.return','reports.export'],'workspace_pages':['dashboard','pos','shifts','orders','deliveries','inventory','counts','transfers','purchases','sales']},
     'cashier': {'permissions':['workspace'],'workspace_pages':['pos','shifts','inventory','sales']},
     'inventory': {'permissions':['workspace','inventory.change','counts.submit','transfers.manage','purchases.receive'],'workspace_pages':['inventory','counts','transfers','purchases']},
+    'delivery': {'permissions':['delivery.mobile'],'workspace_pages':[]},
 }
 
 def access_for(user):
@@ -43,14 +44,16 @@ def create_session(db, user):
     return token, csrf
 
 def current_user(request: Request, db: DBSession = Depends(database)):
-    token = request.cookies.get('grocery_session', '')
+    authorization=request.headers.get('authorization','')
+    bearer=authorization[7:].strip() if authorization.lower().startswith('bearer ') else ''
+    token = bearer or request.cookies.get('grocery_session', '')
     session = db.get(Session, token_hash(token)) if token else None
     if not session or session.expires_at <= now():
         raise HTTPException(401, 'Please sign in to continue.')
     user = db.get(User, session.user_id)
     if not user or not user.active:
         raise HTTPException(401, 'This account is inactive.')
-    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+    if not bearer and request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.csrf):
             raise HTTPException(403, 'Session validation failed. Refresh and retry.')
     request.state.csrf = session.csrf

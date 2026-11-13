@@ -16,6 +16,7 @@ class Branch(Base):
     longitude: Mapped[float] = mapped_column(Numeric(10, 7))
     radius_km: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=10)
     delivery_fee: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=30)
+    delivery_slabs: Mapped[list] = mapped_column(JSON, default=list, server_default='[]')
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     accepting_orders: Mapped[bool] = mapped_column(Boolean, default=True)
     hours: Mapped[str] = mapped_column(String(120), default='09:00–21:00')
@@ -30,6 +31,17 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default='customer')
     branch_id: Mapped[int | None] = mapped_column(ForeignKey('branches.id'))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class CustomerAddress(Base):
+    __tablename__ = 'customer_addresses'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    label: Mapped[str] = mapped_column(String(80))
+    address: Mapped[str] = mapped_column(String(500))
+    phone: Mapped[str | None] = mapped_column(String(10))
+    latitude: Mapped[Decimal] = mapped_column(Numeric(10,7))
+    longitude: Mapped[Decimal] = mapped_column(Numeric(10,7))
+    __table_args__ = (CheckConstraint('latitude >= -90 AND latitude <= 90'), CheckConstraint('longitude >= -180 AND longitude <= 180'))
 
 class Session(Base):
     __tablename__ = 'sessions'
@@ -112,6 +124,8 @@ class Order(Base):
     branch_id: Mapped[int] = mapped_column(ForeignKey('branches.id'), index=True)
     method: Mapped[str] = mapped_column(String(20))
     address: Mapped[str] = mapped_column(String(500), default='')
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7))
     phone: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30), default='placed')
     payment_status: Mapped[str] = mapped_column(String(20), default='unpaid')
@@ -126,8 +140,24 @@ class Order(Base):
     coverage_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     coverage_approved_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'))
     estimated_delivery_days: Mapped[int | None] = mapped_column(Integer)
+    assigned_delivery_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'),index=True)
+    delivery_assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    driver_latitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7))
+    driver_longitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7))
+    driver_location_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+class OrderCollection(Base):
+    __tablename__ = 'order_collections'
+    order_id: Mapped[int] = mapped_column(ForeignKey('orders.id'), primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    payment_method: Mapped[str] = mapped_column(String(20))
+    payments: Mapped[list] = mapped_column(JSON)
+    total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    amount_tendered: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    change_due: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 class OrderItem(Base):
     __tablename__ = 'order_items'

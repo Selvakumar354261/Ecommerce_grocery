@@ -53,6 +53,14 @@ def distance(lat,lon,blat,blon):
     h=math.sin((c-a)/2)**2+math.cos(a)*math.cos(c)*math.sin((d-b)/2)**2
     return 6371*2*math.asin(min(1,math.sqrt(h)))
 
+def distance_delivery_fee(branch,km):
+    km=Decimal(str(km))
+    if km>branch.radius_km:return Decimal('0.00')  # Manager quotes outside coverage.
+    for slab in branch.delivery_slabs or []:
+        if km<=Decimal(str(slab['up_to_km'])):return money(Decimal(str(slab['fee'])))
+    if branch.delivery_slabs:raise HTTPException(409,'Branch delivery pricing is incomplete. Contact the branch.')
+    return money(branch.delivery_fee)
+
 def eligibility(db, data):
     checked=lines(db,data.items)
     result=[]
@@ -61,8 +69,12 @@ def eligibility(db, data):
         stock={s.variant_id:s for s in db.scalars(select(Stock).where(Stock.branch_id==b.id)).all()}
         missing=[x['name'] for x in checked if x['variant_id'] not in stock or available(stock[x['variant_id']])<x['quantity']]
         covered=data.method=='pickup' or km<=b.radius_km
-        result.append(dict(id=b.id,name=b.name,address=b.address,hours=b.hours,distance_km=round(km,2),eligible=not missing,missing=missing,covered=covered,requires_approval=not covered,delivery_fee=str(b.delivery_fee if data.method=='delivery' else 0),recommended=False))
+        result.append(dict(id=b.id,name=b.name,address=b.address,hours=b.hours,distance_km=round(km,2),eligible=not missing,missing=missing,covered=covered,requires_approval=not covered,delivery_fee=str(distance_delivery_fee(b,km) if data.method=='delivery' else 0),recommended=False))
     result.sort(key=lambda x:(not x['eligible'],x['requires_approval'],x['distance_km']))
+    subtotal=sum((line['line_total'] for line in checked),Decimal(0))
+    for option in result:
+        option['subtotal']=str(money(subtotal))
+        option['total']=str(money(subtotal+Decimal(option['delivery_fee'])))
     first=next((x for x in result if x['eligible']),None)
     if first: first['recommended']=True
     return result
@@ -85,7 +97,7 @@ def create_order(db,user,data):
     if data.method=='delivery' and len(data.address.strip())<8: raise HTTPException(422,'Enter a complete delivery address.')
     b=get_or_404(db,Branch,data.branch_id,True)
     if not b.active or not b.accepting_orders: raise HTTPException(409,'This branch is not accepting orders.')
-    delivery_distance=Decimal(str(round(distance(data.latitude,data.longitude,b.latitude,b.longitude),2))) if data.method=='delivery' else None
+    delivery_distance=Decimal(str(distance(data.latitude,data.longitude,b.latitude,b.longitude))) if data.method=='delivery' else None
     requires_approval=data.method=='delivery' and delivery_distance>b.radius_km
     checked=lines(db,data.items)
     stock=lock_stock(db,b.id,[x['variant_id'] for x in checked])
@@ -96,9 +108,9 @@ def create_order(db,user,data):
     subtotal=sum((x['line_total'] for x in checked),Decimal(0))
     if data.expected_subtotal is not None and data.expected_subtotal!=subtotal:
         raise HTTPException(409,'Product prices changed. Refresh the catalogue and review your total.')
-    fee=Decimal(0) if requires_approval else (b.delivery_fee if data.method=='delivery' else Decimal(0))
+    fee=Decimal(0) if requires_approval else (distance_delivery_fee(b,delivery_distance) if data.method=='delivery' else Decimal(0))
     placed_at=now();status='approval_pending' if requires_approval else 'placed'
-    order=Order(user_id=user.id,branch_id=b.id,method=data.method,address=data.address,phone=data.phone,status=status,subtotal=subtotal,delivery_fee=fee,total=subtotal+fee,pickup_code=str(secrets.randbelow(900000)+100000),coverage_approval_required=requires_approval,delivery_distance_km=delivery_distance,approval_expires_at=placed_at+timedelta(hours=24) if requires_approval else None,expires_at=None if requires_approval else placed_at+timedelta(hours=reservation_hours(db)))
+    order=Order(user_id=user.id,branch_id=b.id,method=data.method,address=data.address,latitude=Decimal(str(data.latitude)),longitude=Decimal(str(data.longitude)),phone=data.phone,status=status,subtotal=subtotal,delivery_fee=fee,total=subtotal+fee,pickup_code=str(secrets.randbelow(900000)+100000),coverage_approval_required=requires_approval,delivery_distance_km=delivery_distance,approval_expires_at=placed_at+timedelta(hours=24) if requires_approval else None,expires_at=None if requires_approval else placed_at+timedelta(hours=reservation_hours(db)))
     db.add(order);db.flush()
     for x in checked: db.add(OrderItem(order_id=order.id,**x))
     note='Order placed outside normal delivery coverage; awaiting manager approval within 24 hours.' if requires_approval else 'Stock reserved; awaiting branch confirmation.'
@@ -185,7 +197,10 @@ def create_sale(db,user,data):
         if data.payments:raise HTTPException(422,'Payment breakdown is only accepted for split payments.')
         allocations={data.payment_method:total}
     cash_amount=allocations.get('cash',Decimal(0))
-    if cash_amount:
+    if data.payment_method=='split':
+        if data.amount_tendered is not None and data.amount_tendered!=cash_amount:raise HTTPException(422,'For split payments, cash collected must equal the cash portion; no change is calculated.')
+        amount_tendered=money(cash_amount) if cash_amount else None;change_due=Decimal(0)
+    elif cash_amount:
         if data.amount_tendered is None:raise HTTPException(422,'Enter the actual cash received from the customer.')
         if data.amount_tendered<cash_amount:raise HTTPException(422,'Cash received cannot be less than the cash portion.')
         amount_tendered=money(data.amount_tendered);change_due=money(amount_tendered-cash_amount)

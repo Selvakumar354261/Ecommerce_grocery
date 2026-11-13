@@ -20,19 +20,12 @@ Open **http://localhost:8080**. API documentation is at **http://localhost:8080/
 
 If 8080 is occupied, change APP_PORT and ALLOWED_ORIGINS in `.env` together. Use the exact origin shown in your browser, without a trailing slash.
 
-## Demo sign-ins
+## Local administrator seed
 
-Every demo account uses the password set by DEMO_PASSWORD in `.env` (default: `DemoGrocery!2026`). These are local demonstration accounts, not production credentials.
+Set `SEED_ADMIN_ONLY=true` to create `admin@test.com` with password `1234567890` for local testing. Existing administrators and their passwords are never replaced. Change this weak password before real use.
 
-| Role | Email | Access |
-|---|---|---|
-| Owner | admin@grove.local | All branches and central administration |
-| Manager | manager@grove.local | Central Market branch |
-| Cashier | cashier@grove.local | Central Market POS, orders, inventory viewing |
-| Inventory | inventory@grove.local | Central Market receiving, transfers, counts |
-| Customer | customer@grove.local | Own checkout and orders |
 
-The seed is idempotent and runs only for an empty users table with SEED_DEMO=true. Changing DEMO_PASSWORD after accounts exist does not reset their passwords. Four example branches, eight products, sealed and loose variants, opening stock movements, and a supplier are included. These branches and contact data are illustrative.
+Application demo seeding has been removed. Create branches, products and staff in the admin portal. Sample business data exists only in the isolated `grocery_test` test fixture; `SEED_DEMO` and `DEMO_PASSWORD` no longer control application startup. Existing database records are not deleted by this change.
 
 ## Try the complete workflow
 
@@ -69,10 +62,32 @@ Keep customer and staff sessions in separate browser profiles or private windows
 | backend | FastAPI/Uvicorn application |
 | worker | Reservation expiry, using the backend image |
 | frontend | Built React/TypeScript/MUI app served by Nginx |
+| delivery-mobile-flutter | Flutter delivery app for Android and iOS |
 | proxy | Nginx same-origin web/API routing, bound to localhost |
 | tests | Optional test-profile runner against grocery_test |
 
 `backend/app` contains models, schemas, authentication, business services, routes, seed, worker, and administrator bootstrap. `backend/migrations` contains the frozen initial SQL and Alembic revision. `frontend/src` contains the customer and staff UI. `infra` holds reverse-proxy routing. `docs` describes architecture, operations, API examples, and actual validation.
+
+## Delivery mobile app
+
+The `delivery-mobile-flutter` project supports Android and iOS from one Flutter codebase. Create a staff account with the **Delivery** role, move a delivery order to **Ready**, and assign that delivery person from **Online orders**. The app supports assigned jobs, calling the customer, Google Maps directions, trip start, cash collection, customer OTP completion, GPS reporting to authorised staff, and unsuccessful-delivery reasons.
+
+Set the API address before starting. A physical phone must use the computer's LAN IP or the deployed HTTPS hostname; `localhost` points to the phone itself.
+
+```powershell
+cd delivery-mobile-flutter
+flutter run --dart-define=API_URL=http://192.168.1.20:8080/api/v1
+```
+
+Build Android APK/App Bundle or an iOS archive with Flutter:
+
+```powershell
+flutter build apk --release --dart-define=API_URL=https://your-domain.example/api/v1
+flutter build appbundle --release --dart-define=API_URL=https://your-domain.example/api/v1
+flutter build ipa --release --dart-define=API_URL=https://your-domain.example/api/v1
+```
+
+iOS builds require macOS, Xcode, an Apple Developer account, and Apple signing credentials.
 
 ## Development through Docker
 
@@ -103,7 +118,9 @@ The database volume remains. Do not add `-v` unless you intentionally want to de
 
 ## Fresh installation without demo data
 
-On a fresh database, set SEED_DEMO=false, use a strong unique POSTGRES_PASSWORD, and start the services. Then create the first administrator interactively:
+For a local test installation with **only an administrator**, set `SEED_ADMIN_ONLY=true` in `.env`, then run `docker compose up -d --build`. Sign in at `/portal/login` with `admin@test.com` and password `1234567890`. It never deletes data or resets existing administrator credentials; if an administrator exists it skips creation. Disable `SEED_ADMIN_ONLY` and change this weak test password before any real deployment. For a real installation use the interactive bootstrap below instead.
+
+On a fresh database, set `SEED_ADMIN_ONLY=false`, use a strong unique POSTGRES_PASSWORD, and start the services. Then create the first administrator interactively:
 
 ```powershell
 docker compose run --rm backend python -m app.bootstrap
@@ -115,4 +132,4 @@ Sign in, open Workspace -> Branches, create the first branch, add products and s
 
 This ZIP provides a runnable local application and container setup, not a remotely deployed service. Before public deployment configure HTTPS, Secure cookies, a real business catalogue, branch coverage, secrets, backups, staff procedures, and the required legal/tax rules. The default proxy binds to loopback for local use. See `docs/OPERATIONS.md` for production preparation and recovery commands.
 
-No gateway, mobile app, external geocoder, road routing, driver app, push/SMS/email delivery, offline synchronisation, supplier accounting, automatic sealed-to-loose conversion, or statutory tax engine is included. Those integrations are not silently substituted with mock implementations. The order branch recommendation and all stock transactions use the real backend/database, not browser-only data.
+No payment gateway, external geocoder, built-in road-routing engine, push/SMS/email delivery, offline synchronisation, supplier accounting, automatic sealed-to-loose conversion, or statutory tax engine is included. Google Maps directions open externally from the delivery app. Those integrations are not silently substituted with mock implementations. The order branch recommendation and all stock transactions use the real backend/database, not browser-only data.

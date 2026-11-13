@@ -138,6 +138,68 @@ def test_backend_issues_role_access_capabilities():
     assert cashier.get('/api/v1/dashboard').status_code==403
     assert cashier.get('/api/v1/orders').status_code==403
 
+def test_people_directory_branch_filter():
+    admin=login('admin@gmail.com')
+    everyone=admin.get('/api/v1/admin/users').json()
+    for branch_id in (1,2):
+        response=admin.get('/api/v1/admin/users',params={'branch_id':branch_id})
+        assert response.status_code==200
+        assert response.json()==[u for u in everyone if u['branch_id']==branch_id]
+    assert admin.get('/api/v1/admin/users',params={'branch_id':0}).status_code==422
+    assert admin.get('/api/v1/admin/users',params={'branch_id':999999}).status_code==404
+    manager=login('manager@gmail.com')
+    assert manager.get('/api/v1/admin/users',params={'branch_id':1}).status_code==403
+
+def test_pos_scanning_requires_cashiers_own_open_shift():
+    cashier=login('cashier@gmail.com')
+    assert cashier.get('/api/v1/pos/scan',params={'branch_id':1,'code':'RICE-1KG'}).status_code==200
+    from app.models import Shift
+    with SessionLocal.begin() as db:
+        for shift in db.scalars(select(Shift).where(Shift.closed_at==None)).all():
+            shift.closed_at=now()
+    response=cashier.get('/api/v1/pos/scan',params={'branch_id':1,'code':'RICE-1KG'})
+    assert response.status_code==409
+    assert 'Open your cashier shift' in response.json()['detail']
+
+def test_split_exact_cash_without_tender():
+    admin=login('admin@gmail.com')
+    body={'branch_id':1,'items':[{'variant_id':1,'quantity':'1'}],'payment_method':'split','payments':[{'method':'cash','amount':'50'},{'method':'upi','amount':'28'}]}
+    result=post(admin,'/sales',body)
+    assert result.status_code==201,result.text
+    with SessionLocal() as db:
+        saved=db.get(Sale,result.json()['id'])
+        assert saved.amount_tendered==Decimal('50.00')
+        assert saved.change_due==0
+    from app.order_payments import settlement_quote
+    from app.schemas import OrderPaymentIn
+    from types import SimpleNamespace
+    quote=settlement_quote(SimpleNamespace(total=Decimal('78')),OrderPaymentIn.model_validate({'payment_method':'split','payments':body['payments']}))
+    assert quote['amount_tendered']=='50.00' and quote['change_due']=='0.00'
+
+def test_admin_can_edit_product_details():
+    admin=login('admin@gmail.com')
+    before=admin.get('/api/v1/catalogue').json()[0]
+    details={'name':'Updated rice','category':'Grains','description':'Updated description','tone':'gold'}
+    details['variants']=[{k:v[k] for k in ('id','sku','label','unit','price','min_qty','step','max_qty')} for v in before['variants']]
+    details['variants'][0].update(label='Updated pack',price='90.00',sku='UPDATED-RICE')
+    response=admin.put(f"/api/v1/admin/products/{before['id']}",json=details)
+    assert response.status_code==200
+    after=next(p for p in admin.get('/api/v1/catalogue').json() if p['id']==before['id'])
+    assert all(after[k]==v for k,v in details.items() if k!='variants')
+    assert after['variants'][0]['id']==before['variants'][0]['id']
+    assert after['variants'][0]['label']=='Updated pack'
+    assert after['variants'][0]['sku']=='UPDATED-RICE'
+    assert Decimal(after['variants'][0]['price'])==Decimal('90.00')
+    categories=admin.get('/api/v1/admin/product-categories')
+    assert categories.status_code==200
+    assert 'Grains' in categories.json()
+    assert categories.json()==sorted(set(categories.json()))
+    unsafe={**details,'variants':[{**v,'unit':'kg'} for v in details['variants']]}
+    assert admin.put(f"/api/v1/admin/products/{before['id']}",json=unsafe).status_code==422
+    assert admin.put(f"/api/v1/admin/products/{before['id']}",json={**details,'name':'x'}).status_code==422
+    manager=login('manager@gmail.com')
+    assert manager.put(f"/api/v1/admin/products/{before['id']}",json=details).status_code==403
+
 def test_admin_can_update_staff_credentials_and_password():
     admin=login()
     previous_session=login('cashier@grove.local')
@@ -305,13 +367,64 @@ def test_pickup_completion_consumes_reservation_once():
     for action in ['confirm','prepare','ready']:
         r=post(admin,f'/orders/{ident}/transition',{'action':action});assert r.status_code==200,r.text
     assert post(admin,f'/orders/{ident}/transition',{'action':'collect','pickup_code':'000000'}).status_code==422
-    assert admin.post(f'/api/v1/orders/{ident}/payment').status_code==200
+    assert admin.post(f'/api/v1/orders/{ident}/payment',json={'payment_method':'cash','amount_tendered':'200.00'}).status_code==200
     code=customer.get(f'/api/v1/orders/{ident}').json()['pickup_code']
     r=post(admin,f'/orders/{ident}/transition',{'action':'collect','pickup_code':code},'collect-once');assert r.status_code==200,r.text
     assert post(admin,f'/orders/{ident}/transition',{'action':'collect','pickup_code':code},'collect-once').status_code==200
     online_sales=admin.get('/api/v1/online-sales?branch_id=1')
     assert online_sales.status_code==200 and online_sales.json()[0]['id']==ident
     with SessionLocal() as db:assert stock(db).on_hand==38 and stock(db).reserved==0
+
+def test_delivery_mobile_assignment_cash_otp_and_role_isolation():
+    admin=login();manager=login('manager@grove.local');customer=login('customer@grove.local')
+    created=admin.post('/api/v1/admin/users',json={'name':'Branch Driver','email':'driver@chinnu.local','password':'DriverPass!2026','role':'delivery','branch_id':1})
+    assert created.status_code==200,created.text
+    driver_id=created.json()['id']
+    ident=post(customer,'/orders',order_body('delivery')).json()['id']
+    for action in ['confirm','prepare','ready']:
+        result=post(manager,f'/orders/{ident}/transition',{'action':action})
+        assert result.status_code==200,result.text
+    assigned=admin.post(f'/api/v1/orders/{ident}/assign-delivery',json={'delivery_user_id':driver_id})
+    assert assigned.status_code==200 and assigned.json()['assigned_delivery_user_id']==driver_id
+    customer_assignment=customer.get(f'/api/v1/orders/{ident}').json()
+    assert customer_assignment['assigned_delivery_name'] is None
+    assignment_event=next(event for event in customer_assignment['events'] if event['status']=='delivery_assigned')
+    assert assignment_event['display_status']=='dispatched' and assignment_event['note']==''
+    assert assigned.json()['events'][-1]['note']=='Assigned to Branch Driver.'
+    signed_in=TestClient(app).post('/api/v1/delivery/auth/login',json={'email':'driver@chinnu.local','password':'DriverPass!2026'})
+    assert signed_in.status_code==200,signed_in.text
+    mobile=TestClient(app,headers={'Authorization':f"Bearer {signed_in.json()['token']}"})
+    jobs=mobile.get('/api/v1/delivery/orders')
+    assert jobs.status_code==200 and jobs.json()[0]['id']==ident and 'pickup_code' not in jobs.json()[0]
+    assert jobs.json()[0]['latitude']=='11.3410000' and jobs.json()[0]['longitude']=='77.7172000'
+    assert mobile.get('/api/v1/inventory?branch_id=1').status_code==403
+    assert mobile.get('/api/v1/orders').status_code==403
+    started=mobile.post(f'/api/v1/delivery/orders/{ident}/start',headers={'Idempotency-Key':'driver-start'})
+    assert started.status_code==200 and started.json()['status']=='dispatched'
+    customer_trip=customer.get(f'/api/v1/orders/{ident}').json()
+    assert customer_trip['events'][-1]['note']=='Delivery person started the trip.'
+    assert customer_trip['events'][-1]['display_status']=='delivery_started'
+    location=mobile.post(f'/api/v1/delivery/orders/{ident}/location',json={'latitude':11.3421,'longitude':77.7183})
+    assert location.status_code==200
+    assert customer.get(f'/api/v1/orders/{ident}/tracking').status_code==403
+    tracking=manager.get(f'/api/v1/orders/{ident}/tracking')
+    assert tracking.status_code==200 and tracking.json()['driver_latitude']=='11.3421000' and tracking.json()['driver_name']=='Branch Driver'
+    failed=mobile.post(f'/api/v1/delivery/orders/{ident}/failed',json={'reason':'Customer requested a later delivery attempt.'})
+    assert failed.status_code==200
+    assert mobile.post(f'/api/v1/delivery/orders/{ident}/complete',json={'otp':'000000'},headers={'Idempotency-Key':'wrong-otp'}).status_code==422
+    assert mobile.post(f'/api/v1/orders/{ident}/payment',json={'payment_method':'cash','amount_tendered':'200.00'}).status_code==200
+    code=customer.get(f'/api/v1/orders/{ident}').json()['pickup_code']
+    completed=mobile.post(f'/api/v1/delivery/orders/{ident}/complete',json={'otp':code},headers={'Idempotency-Key':'complete-delivery'})
+    assert completed.status_code==200 and completed.json()['status']=='completed'
+    customer_history=customer.get(f'/api/v1/orders/{ident}').json()['events']
+    assert customer_history[-1]['tone']=='success'
+    assert next(event for event in customer_history if event['status']=='payment_received')['tone']=='success'
+    assert next(event for event in customer_history if event['status']=='delivery_failed')['tone']=='error'
+    assert mobile.get('/api/v1/delivery/orders').json()==[]
+    with SessionLocal() as db:
+        order=db.get(Order,ident)
+        assert order.status=='completed' and stock(db).on_hand==38 and stock(db).reserved==0
+        assert db.scalar(select(func.count(OrderEvent.id)).where(OrderEvent.order_id==ident,OrderEvent.status=='delivery_failed'))==1
 
 def test_oversell_concurrency_between_pos_and_order():
     with SessionLocal.begin() as db:stock(db).on_hand=1
@@ -399,9 +512,9 @@ def test_pos_payment_methods_and_cash_change():
     assert card.status_code==201,card.text
     upi=post(admin,'/sales',{'branch_id':1,'items':[{'variant_id':1,'quantity':'1'}],'payment_method':'upi'})
     assert upi.status_code==201,upi.text
-    split=post(admin,'/sales',{'branch_id':1,'items':[{'variant_id':1,'quantity':'1'}],'payment_method':'split','payments':[{'method':'cash','amount':'50'},{'method':'card','amount':'28'}],'amount_tendered':'60'})
+    split=post(admin,'/sales',{'branch_id':1,'items':[{'variant_id':1,'quantity':'1'}],'payment_method':'split','payments':[{'method':'cash','amount':'50'},{'method':'card','amount':'28'}]})
     assert split.status_code==201,split.text
-    assert split.json()['change_due']=='10.00' and split.json()['payment_method']=='split'
+    assert split.json()['change_due']=='0.00' and split.json()['payment_method']=='split'
     assert {part['method']:part['amount'] for part in split.json()['payments']}=={'cash':'50.00','card':'28.00'}
     invalid_split=post(admin,'/sales',{'branch_id':1,'items':[{'variant_id':1,'quantity':'1'}],'payment_method':'split','payments':[{'method':'cash','amount':'50'},{'method':'upi','amount':'20'}],'amount_tendered':'50'})
     assert invalid_split.status_code==422

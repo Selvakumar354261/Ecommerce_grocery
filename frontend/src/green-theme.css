@@ -1,0 +1,31 @@
+/* Shared green identity. Error/warning colours intentionally remain semantic. */
+:root { color-scheme: light; --brand-primary: #1d6546; --brand-accent: #43865c; --brand-logo-background: transparent; }
+body { background: #f3f8f3; color: #173c29; }
+.topbar { background: #fafffaed !important; border-bottom-color: #d6e5d8; }
+.eyebrow, .workspace-heading .eyebrow, .workspace .sidebar-label { color: #397650; }
+.storefront { --store-green: #1d6546; --store-gold: #43865c; }
+.storefront .hero { background: linear-gradient(115deg, #f0f7ee, #e3f0e2 58%, #cfe5d0); border-color: #c9ddcb; }
+.storefront .hero .eyebrow { color: #397650; }
+.storefront .hero-visual { background: radial-gradient(circle, #f7fff7b3 0%, transparent 68%); }
+.storefront .hero h1 em { color: #1d6546; }
+.storefront .hero-copy p, .storefront .hero-foot, .storefront .benefit-strip { color: #486950; }
+.storefront a:focus-visible, .storefront button:focus-visible, .workspace .nav-item:focus-visible { outline-color: #43865c; }
+.storefront .product-card, .storefront .location-card { border-color: #d1e2d3; }
+.product-art.sage { background: #e2eedd; }
+.product-art.gold { background: #e5efdc; }
+.product-art.rose { background: #dcebe1; }
+.product-art.clay { background: #e0ebe3; }
+.store-footer, .auth-story { background: #e3efe1; color: #42664b; }
+.workspace { background: #f3f8f3; }
+.workspace .sidebar { background: #fafffa; border-color: #d6e5d8; }
+.workspace .nav-item.active { background: #1d6546; color: white; }
+.workspace .nav-item.active::before, .workspace .metric-0::after { background: #87bc8d; }
+.workspace .nav-item:not(.active):hover { background: #e4f0e4; color: #1d6546; }
+.workspace .metric-0 { background: linear-gradient(120deg, #1d6546, #12452f) !important; border-color: #1d6546 !important; }
+.workspace .priority-panel { background: #e7f2e4 !important; }
+.workspace .MuiTableHead-root { background: #e7f1e8; }
+.workspace .MuiTableBody-root .MuiTableRow-root:hover { background: #f0f7ef; }
+.workspace-profile .avatar, .branch-card-icon { background: #e3f0e1; color: #1d6546; }
+.workspace-top, .workspace-profile, .branch-card-details, .branch-card-footer { border-color: #d6e5d8; }
+.workspace .MuiPaper-outlined, .customer-checkout .MuiPaper-outlined { border-color: #d1e2d3; }
+.branch-option.selected { background: #e8f4e7; border-color: #43865c; }

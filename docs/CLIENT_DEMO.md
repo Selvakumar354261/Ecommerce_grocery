@@ -1,5 +1,19 @@
 # Client demonstration
 
+## Start the installed Android delivery app
+
+Connect an unlocked phone by USB with USB debugging authorized, then run from the repository root:
+
+```powershell
+.\start.ps1 -Mobile
+```
+
+This starts Docker and launches the delivery app. The first run builds and installs an APK configured for USB forwarding; subsequent runs reuse it unless mobile source/configuration changes. Updates use `adb install -r` to preserve app data. Backend-only changes do not trigger an APK rebuild.
+
+If Docker is already running, use `.\start-mobile.ps1`. Force a mobile rebuild with `.\start-mobile.ps1 -Rebuild`. Multiple connected phones require `-DeviceId SERIAL` on that script. This helper currently assumes the server uses port 8080 and Flutter is installed at `C:\Develop\flutter`.
+
+Keep USB connected for backend access in this testing mode. Docker cannot automatically open apps on disconnected phones, and running `docker compose up` directly does not invoke this helper. Installed apps used over Wi-Fi can instead be opened manually, provided their configured server address is reachable.
+
 Use a fresh local demo database. Keep the customer session in one browser profile and staff in another. This walkthrough demonstrates connected business behaviour, not external gateway or delivery-provider integrations.
 
 1. **Catalogue flexibility** — show the same rice product with 1 kg/5 kg sealed options and loose kg. Add an allowed fractional quantity of almonds. Explain that sealed and loose inventories are independent and that central prices are the same in every branch.

@@ -4,14 +4,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from app.db import SessionLocal, engine
 from app.main import app
-from app.seed import main as seed
+from sample_data import main as seed
 
 @pytest.fixture(autouse=True)
-def reset():
+def reset(monkeypatch):
+    monkeypatch.setenv('SEED_ADMIN_ONLY','false')
     assert engine.url.database=='grocery_test','Tests require the isolated grocery_test database.'
     with engine.begin() as connection:
         connection.execute(text('TRUNCATE '+','.join('"'+t+'"' for t in __import__('app.models',fromlist=['Base']).Base.metadata.tables)+' RESTART IDENTITY CASCADE'))
-    os.environ['SEED_DEMO']='true'
     os.environ['DEMO_PASSWORD']='DemoGrocery!2026'
     seed()
 
