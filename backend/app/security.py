@@ -18,13 +18,17 @@ ROLE_ACCESS = {
     'delivery': {'permissions':['delivery.mobile'],'workspace_pages':[]},
 }
 
-def admin_login_only():
-    return os.getenv('ADMIN_LOGIN_ONLY','true').lower()!='false'
+def login_roles():
+    """Roles allowed to sign in, from LOGIN_ROLES (comma-separated). Admin is always allowed so it cannot be locked out."""
+    configured=os.getenv('LOGIN_ROLES','admin,customer')
+    return {role.strip().lower() for role in configured.split(',') if role.strip()}|{'admin'}
 
-def ensure_login_allowed(user=None):
-    """Block every non-admin sign-in (customer OTP, registration, delivery, staff) while ADMIN_LOGIN_ONLY is on."""
-    if admin_login_only() and (user is None or user.role!='admin'):
-        raise HTTPException(403,'Only administrator login is enabled.')
+def role_can_login(role):
+    return role in login_roles()
+
+def ensure_login_allowed(role):
+    if not role_can_login(role):
+        raise HTTPException(403,'This login is currently disabled.')
 
 def access_for(user):
     access=ROLE_ACCESS.get(user.role,{'permissions':[],'workspace_pages':[]})
@@ -47,7 +51,7 @@ def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 def create_session(db, user):
-    ensure_login_allowed(user)
+    ensure_login_allowed(user.role)
     token, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
     db.add(Session(token_hash=token_hash(token), user_id=user.id, csrf=csrf, expires_at=now()+timedelta(hours=12)))
     return token, csrf
@@ -62,8 +66,8 @@ def current_user(request: Request, db: DBSession = Depends(database)):
     user = db.get(User, session.user_id)
     if not user or not user.active:
         raise HTTPException(401, 'This account is inactive.')
-    if admin_login_only() and user.role != 'admin':
-        raise HTTPException(401, 'Only administrator login is enabled.')
+    if not role_can_login(user.role):
+        raise HTTPException(401, 'This login is currently disabled.')
     if not bearer and request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.csrf):
             raise HTTPException(403, 'Session validation failed. Refresh and retry.')

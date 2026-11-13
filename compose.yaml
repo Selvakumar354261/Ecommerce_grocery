@@ -4,7 +4,7 @@ x-api: &api
   environment: &env
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-grocery}:${POSTGRES_PASSWORD:-local-only-change-this-password}@db:5432/${POSTGRES_DB:-grocery}
     SEED_ADMIN_ONLY: ${SEED_ADMIN_ONLY:-false}
-    ADMIN_LOGIN_ONLY: ${ADMIN_LOGIN_ONLY:-true}
+    LOGIN_ROLES: ${LOGIN_ROLES:-admin,customer}
     COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
     RESERVATION_MINUTES: ${RESERVATION_MINUTES:-30}
